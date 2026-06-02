@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LeaderRoundDecision",
+  "description": "Leader LLM output after reviewing all worker results for one round.",
+  "type": "object",
+  "required": [
+    "round_id",
+    "overall_assessment",
+    "stop_or_continue",
+    "worker_guidance"
+  ],
+  "properties": {
+    "round_id": {
+      "type": "integer",
+      "description": "Current round number."
+    },
+    "overall_assessment": {
+      "type": "string",
+      "description": "Leader's natural-language analysis of this round (trends, bottlenecks, key observations). 2-5 sentences."
+    },
+    "global_score_trend": {
+      "type": "string",
+      "enum": ["improving", "plateauing", "declining"],
+      "description": "Trend of the global objective across recent rounds."
+    },
+    "stop_or_continue": {
+      "type": "string",
+      "enum": ["continue", "stop"],
+      "description": "Whether to proceed to the next round or stop."
+    },
+    "stop_reason": {
+      "type": "string",
+      "description": "If stop, explain why (e.g., target reached, plateau detected)."
+    },
+    "worker_guidance": {
+      "type": "array",
+      "description": "Per-worker guidance for the next round.",
+      "items": {
+        "type": "object",
+        "required": [
+          "subbasin_id",
+          "priority_focus",
+          "param_adjustments"
+        ],
+        "properties": {
+          "subbasin_id": {
+            "type": "string",
+            "description": "Target subbasin identifier."
+          },
+          "priority_focus": {
+            "type": "string",
+            "description": "What this worker should focus on next round (e.g., 'reduce peak overshoot', 'improve low flow', 'decrease PBIAS')."
+          },
+          "param_adjustments": {
+            "type": "array",
+            "description": "Suggested direction for each parameter.",
+            "items": {
+              "type": "object",
+              "required": ["param", "direction", "magnitude"],
+              "properties": {
+                "param": {
+                  "type": "string",
+                  "enum": ["binfilt", "Ds", "Dsmax", "Ws", "soil_d2", "soil_d3", "velocity", "diffusivity"]
+                },
+                "direction": {
+                  "type": "string",
+                  "enum": ["increase", "decrease", "hold"],
+                  "description": "Direction of adjustment."
+                },
+                "magnitude": {
+                  "type": "string",
+                  "enum": ["large", "medium", "small", "none"],
+                  "description": "Relative magnitude of adjustment."
+                },
+                "reasoning": {
+                  "type": "string",
+                  "description": "Brief physical reasoning for this adjustment."
+                }
+              }
+            }
+          },
+          "search_radius_hint": {
+            "type": "string",
+            "enum": ["shrink", "expand", "keep"],
+            "description": "Whether to shrink, expand, or keep the search radius for this worker."
+          }
+        }
+      }
+    },
+    "phase_recommendation": {
+      "type": "string",
+      "enum": ["stay", "advance"],
+      "description": "Whether to stay in the current calibration phase or advance to the next phase. Set 'advance' when current phase parameters have converged. Only relevant during VIC_ONLY and ROUTING_ONLY phases."
+    },
+    "next_round_strategy": {
+      "type": "string",
+      "description": "High-level strategy for next round (e.g., 'fine-tune around current best', 'explore wider for soil_d3', 'lock upstream and focus outlet')."
+    }
+  }
+}

@@ -1,0 +1,1850 @@
+#!/usr/bin/env python3
+"""LangGraph node functions for TRAv2 calibration.
+
+Each function takes CalibrationState and returns a partial state update dict.
+All domain logic is delegated to existing modules; these nodes are pure
+orchestration glue.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import json
+import logging
+import shutil
+import traceback
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from .graph_state import CalibrationState, PhaseSpec
+from .phase_config import (
+    load_phase_pipeline,
+    check_phase_transition,
+    should_use_multi_candidate,
+    get_total_max_rounds,
+)
+from .context_manager import ContextManager, compress_history, compress_diagnostics
+
+from .llm_client import LLMClient, LLMClientConfig, LLMResponse, create_client
+from .param_validator import (
+    PARAM_KEYS,
+    DEFAULT_RANGES,
+    CalibrationPhase,
+    get_tunable_keys,
+    get_locked_keys,
+    enforce_phase_locks,
+    normalize_params,
+    validate_params,
+    safe_apply_leader_guidance,
+    fallback_rule_based_candidates,
+    generate_candidates_from_proposals,
+    apply_adjustments,
+    clamp,
+    validate_leader_output,
+)
+from .routing_utils import UpstreamRoutingInfo, find_direc_in_template
+from .vic_runner import UpstreamSoilInfo
+from .leader_agent import LeaderAgent, LeaderMemory
+from .worker_agent import WorkerAgent, WorkerMemory
+from .vic_executor import VICExecutor, VICConfig
+from .leader_coordinator import LeaderCoordinator
+from .worker_diagnostics import diagnose_round
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Utility (same as orchestrator)
+# ---------------------------------------------------------------------------
+
+def _utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def _to_native(obj):
+    """Recursively convert numpy types to native Python for msgpack serialization."""
+    import numpy as np
+    if isinstance(obj, dict):
+        return {k: _to_native(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_to_native(v) for v in obj)
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    return obj
+
+
+def _ensure_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def _write_json(path: Path, obj: Any) -> None:
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2, default=str)
+
+
+def _append_jsonl(path: Path, obj: Dict) -> None:
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False, default=str) + "\n")
+
+
+def _score_row(metrics: Dict[str, float]) -> float:
+    return float(metrics.get("NSE", -1))
+
+
+# ---------------------------------------------------------------------------
+# Shared objects cache (created once per graph invocation)
+# ---------------------------------------------------------------------------
+
+_SHARED: Dict[str, Any] = {}
+
+
+def _get_shared(state: CalibrationState) -> Dict[str, Any]:
+    """Lazily build shared objects (leader, workers, vic_executor, etc.)."""
+    if _SHARED.get("_initialized"):
+        return _SHARED
+
+    cfg = state["team_config"]
+    worker_cfgs = state["worker_cfgs"]
+    output_root = Path(state["output_root"])
+    dry_run = state.get("dry_run", False)
+    mode = state.get("mode", "simulate")
+    param_ranges = state["param_ranges"]
+    range_lists = {k: list(v) if isinstance(v, tuple) else v
+                   for k, v in param_ranges.items()}
+
+    # Leader
+    leader_cfg = cfg["leader"]
+    if dry_run:
+        leader_llm = _DummyLLMClient("dry-run-leader")
+    else:
+        leader_llm = _create_llm_client(leader_cfg)
+    leader = LeaderAgent(
+        agent_id=leader_cfg["agent_id"],
+        llm_client=leader_llm,
+        workers=worker_cfgs,
+        objective_weights=state.get("objective_weights", {}),
+        stop_rules=state.get("stop_rules", {}),
+        param_ranges=range_lists,
+    )
+
+    # Workers (CRAv2: no LLM — pure code execution)
+    workers: Dict[str, WorkerAgent] = {}
+    for w_cfg in worker_cfgs:
+        sid = w_cfg["subbasin_id"]
+        workers[sid] = WorkerAgent(
+            agent_id=w_cfg["agent_id"],
+            subbasin_id=sid,
+            station_code=w_cfg.get("station_code", sid),
+            is_outlet=w_cfg.get("is_outlet", False),
+            neighbors_downstream=w_cfg.get("neighbors_downstream", []),
+            param_ranges=range_lists,
+            window_size=int(w_cfg.get("memory_window", 5)),
+        )
+        workers[sid].set_output_dir(str(output_root))
+
+    # VIC executor
+    vic_executor = VICExecutor(mode=mode)
+    if mode == "real":
+        for w_cfg in worker_cfgs:
+            sid = w_cfg["subbasin_id"]
+            vic_cfg = VICConfig(
+                basin_name=sid,
+                base_output_dir=str(output_root),
+                soil_base=w_cfg.get("soil_base", ""),
+                global_base=w_cfg.get("global_base", ""),
+                obs_file=w_cfg.get("obs_file", ""),
+                rout_template_dir=w_cfg.get("rout_template_dir", ""),
+                vic_exe=w_cfg.get("vic_exe", cfg.get("vic_exe", "")),
+                rout_exe=w_cfg.get("rout_exe", cfg.get("rout_exe", "")),
+                start_year=cfg.get("simulation_period", {}).get("start_year", 1979),
+                end_year=cfg.get("simulation_period", {}).get("end_year", 1980),
+                flux_prefix=w_cfg.get("flux_prefix", "huaihe_fluxes_"),
+                vic_flux_source=w_cfg.get("vic_flux_source", ""),
+            )
+            vic_executor.register_basin(sid, vic_cfg)
+
+        # Validate all VIC paths before any execution
+        issues = vic_executor.validate_all()
+        if issues:
+            for basin, missing in issues.items():
+                logger.error("VIC config [%s] missing paths: %s", basin, missing)
+            raise RuntimeError(
+                f"VIC path validation failed for {len(issues)} basin(s): "
+                + ", ".join(f"{b}({len(m)} missing)" for b, m in issues.items())
+            )
+
+    # Leader coordinator
+    upstream_map = state["upstream_map"]
+    coordinator = LeaderCoordinator(
+        upstream_map=upstream_map,
+        outlet_id=cfg.get("outlet_subbasin_id", "bengbu"),
+    )
+
+    _SHARED.update({
+        "_initialized": True,
+        "leader": leader,
+        "workers": workers,
+        "vic_executor": vic_executor,
+        "coordinator": coordinator,
+    })
+    return _SHARED
+
+
+def _create_llm_client(agent_cfg: Dict) -> LLMClient:
+    return create_client(
+        model=agent_cfg["model"],
+        provider=agent_cfg.get("provider", ""),
+        temperature=agent_cfg.get("temperature", 0.3),
+        max_tokens=agent_cfg.get("max_tokens", 4096),
+        json_mode=True,
+        api_key_env=agent_cfg.get("api_key_env", ""),
+        timeout_sec=agent_cfg.get("timeout_sec", 120.0),
+        max_retries=agent_cfg.get("max_retries", 3),
+    )
+
+
+class _DummyLLMClient:
+    def __init__(self, model="dry-run"):
+        self.config = type("C", (), {
+            "model": model, "temperature": 0, "max_tokens": 0, "json_mode": True
+        })()
+
+    def chat(self, messages=None, system="", **kwargs):
+        return LLMResponse(content="{}", provider="dry-run", model="dry-run")
+
+
+# ---------------------------------------------------------------------------
+# Topology helpers
+# ---------------------------------------------------------------------------
+
+def _build_upstream_map(workers: List[Dict]) -> Dict[str, List[str]]:
+    upstream: Dict[str, List[str]] = {w["subbasin_id"]: [] for w in workers}
+    for w in workers:
+        for ds in w.get("neighbors_downstream", []):
+            if ds in upstream:
+                upstream[ds].append(w["subbasin_id"])
+    return upstream
+
+
+def _compute_topo_levels(upstream_map: Dict[str, List[str]]) -> List[List[str]]:
+    in_degree = {sid: len(ups) for sid, ups in upstream_map.items()}
+    downstream_of: Dict[str, List[str]] = {sid: [] for sid in upstream_map}
+    for sid, ups in upstream_map.items():
+        for up in ups:
+            if up in downstream_of:
+                downstream_of[up].append(sid)
+    levels: List[List[str]] = []
+    queue = [sid for sid, deg in in_degree.items() if deg == 0]
+    while queue:
+        levels.append(sorted(queue))
+        next_queue = []
+        for sid in queue:
+            for ds in downstream_of.get(sid, []):
+                in_degree[ds] -= 1
+                if in_degree[ds] == 0:
+                    next_queue.append(ds)
+        queue = next_queue
+    return levels
+
+
+def _collect_all_upstream(subbasin_id: str, upstream_map: Dict,
+                          full_upstream_map: Dict) -> List[str]:
+    umap = full_upstream_map if full_upstream_map else upstream_map
+    visited: set = set()
+    stack = list(umap.get(subbasin_id, []))
+    while stack:
+        up = stack.pop()
+        if up not in visited:
+            visited.add(up)
+            stack.extend(umap.get(up, []))
+    return list(visited)
+
+
+def _build_upstream_routing_info(
+    subbasin_id: str, state: CalibrationState, worker_cfgs: List[Dict],
+) -> List[UpstreamRoutingInfo]:
+    upstream_map = state["upstream_map"]
+    full_upstream_map = state.get("full_upstream_map", {})
+    fixed_upstream_routing = state.get("fixed_upstream_routing", {})
+    topo_levels = state["topo_levels"]
+    centers = state["centers"]
+
+    all_upstream = _collect_all_upstream(subbasin_id, upstream_map, full_upstream_map)
+    if not all_upstream:
+        return []
+
+    level_of: Dict[str, int] = {}
+    for level_idx, level_sids in enumerate(topo_levels):
+        for s in level_sids:
+            level_of[s] = level_idx
+    if full_upstream_map:
+        umap = full_upstream_map
+        in_deg = {sid: len(ups) for sid, ups in umap.items()}
+        ds_of: Dict[str, List[str]] = {sid: [] for sid in umap}
+        for sid, ups in umap.items():
+            for up in ups:
+                if up in ds_of:
+                    ds_of[up].append(sid)
+        queue = deque([sid for sid, d in in_deg.items() if d == 0])
+        lvl = 0
+        while queue:
+            size = len(queue)
+            for _ in range(size):
+                sid = queue.popleft()
+                if sid not in level_of:
+                    level_of[sid] = lvl
+                for ds in ds_of.get(sid, []):
+                    in_deg[ds] -= 1
+                    if in_deg[ds] == 0:
+                        queue.append(ds)
+            lvl += 1
+
+    all_upstream.sort(key=lambda s: level_of.get(s, 0), reverse=True)
+
+    worker_cfg_by_sid = {w["subbasin_id"]: w for w in worker_cfgs}
+    infos: List[UpstreamRoutingInfo] = []
+    for up_sid in all_upstream:
+        up_cfg = worker_cfg_by_sid.get(up_sid)
+        if up_cfg:
+            rout_dir = up_cfg.get("rout_template_dir", "")
+            direc_path = find_direc_in_template(rout_dir) if rout_dir else ""
+            up_center = centers.get(up_sid, {})
+            infos.append(UpstreamRoutingInfo(
+                direc_path=direc_path,
+                velocity=up_center.get("velocity", 1.5),
+                diffusivity=up_center.get("diffusivity", 800.0),
+            ))
+        elif up_sid in fixed_upstream_routing:
+            fixed = fixed_upstream_routing[up_sid]
+            rout_dir = fixed.get("rout_template_dir", "")
+            direc_path = find_direc_in_template(rout_dir) if rout_dir else ""
+            infos.append(UpstreamRoutingInfo(
+                direc_path=direc_path,
+                velocity=float(fixed.get("velocity", 1.5)),
+                diffusivity=float(fixed.get("diffusivity", 800.0)),
+            ))
+    return infos
+
+
+def _build_upstream_soil_info(
+    subbasin_id: str, state: CalibrationState, worker_cfgs: List[Dict],
+) -> List[UpstreamSoilInfo]:
+    upstream_map = state["upstream_map"]
+    full_upstream_map = state.get("full_upstream_map", {})
+    topo_levels = state["topo_levels"]
+    centers = state["centers"]
+
+    all_upstream = _collect_all_upstream(subbasin_id, upstream_map, full_upstream_map)
+    if not all_upstream:
+        return []
+
+    level_of: Dict[str, int] = {}
+    for level_idx, level_sids in enumerate(topo_levels):
+        for s in level_sids:
+            level_of[s] = level_idx
+    if full_upstream_map:
+        umap = full_upstream_map
+        in_deg = {sid: len(ups) for sid, ups in umap.items()}
+        ds_of: Dict[str, List[str]] = {sid: [] for sid in umap}
+        for sid, ups in umap.items():
+            for up in ups:
+                if up in ds_of:
+                    ds_of[up].append(sid)
+        queue = deque([sid for sid, d in in_deg.items() if d == 0])
+        lvl = 0
+        while queue:
+            size = len(queue)
+            for _ in range(size):
+                sid = queue.popleft()
+                if sid not in level_of:
+                    level_of[sid] = lvl
+                for ds in ds_of.get(sid, []):
+                    in_deg[ds] -= 1
+                    if in_deg[ds] == 0:
+                        queue.append(ds)
+            lvl += 1
+
+    all_upstream.sort(key=lambda s: level_of.get(s, 0), reverse=True)
+
+    worker_cfg_by_sid = {w["subbasin_id"]: w for w in worker_cfgs}
+    infos: List[UpstreamSoilInfo] = []
+    for up_sid in all_upstream:
+        up_cfg = worker_cfg_by_sid.get(up_sid)
+        if up_cfg:
+            soil_base = up_cfg.get("soil_base", "")
+            up_center = centers.get(up_sid, {})
+            soil_params = {k: up_center[k] for k in
+                           ("binfilt", "Ds", "Dsmax", "Ws", "soil_d2", "soil_d3")
+                           if k in up_center}
+            if soil_base and soil_params:
+                infos.append(UpstreamSoilInfo(
+                    soil_base=soil_base,
+                    params=soil_params,
+                ))
+    return infos
+
+
+# ---------------------------------------------------------------------------
+# Anti-flip direction momentum
+# ---------------------------------------------------------------------------
+
+def _apply_anti_flip(
+    direction_history: Dict[str, Dict],
+    sid: str,
+    hints: List[Dict],
+    round_improved: bool,
+) -> Tuple[List[Dict], Dict[str, Dict]]:
+    """Enforce direction momentum. Returns (filtered_hints, updated_direction_history)."""
+    MIN_FAIL_TO_FLIP = 3
+    hist = dict(direction_history.get(sid, {}))
+    filtered = []
+
+    for h in hints:
+        p = h.get("parameter", h.get("param", ""))
+        new_dir = h.get("direction", "hold")
+        new_mag = h.get("magnitude", "none")
+
+        if new_dir == "hold" or new_mag == "none":
+            filtered.append(h)
+            continue
+
+        prev = hist.get(p)
+        if prev is None:
+            hist[p] = {"dir": new_dir, "streak": 1, "fail_count": 0}
+            filtered.append(h)
+            continue
+
+        prev_dir = prev["dir"]
+        same_direction = (new_dir == prev_dir)
+
+        if same_direction:
+            prev["streak"] += 1
+            if round_improved:
+                prev["fail_count"] = 0
+            else:
+                prev["fail_count"] += 1
+            filtered.append(h)
+        else:
+            if round_improved:
+                blocked = dict(h)
+                blocked["direction"] = prev_dir
+                blocked["_antiflip"] = f"blocked: prev {prev_dir} improved"
+                prev["streak"] += 1
+                prev["fail_count"] = 0
+                filtered.append(blocked)
+            elif prev["fail_count"] < MIN_FAIL_TO_FLIP:
+                blocked = dict(h)
+                blocked["direction"] = "hold"
+                blocked["magnitude"] = "none"
+                blocked["_antiflip"] = f"hold: only {prev['fail_count']} fails"
+                prev["fail_count"] += 1
+                filtered.append(blocked)
+            else:
+                hist[p] = {"dir": new_dir, "streak": 1, "fail_count": 0}
+                filtered.append(h)
+
+    updated = dict(direction_history)
+    updated[sid] = hist
+    return filtered, updated
+
+
+# ===========================================================================
+# NODE FUNCTIONS
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# 1. init_calibration
+# ---------------------------------------------------------------------------
+
+def init_calibration(state: CalibrationState) -> Dict[str, Any]:
+    """Initialize calibration: load config, create agents, set up state."""
+    cfg = state["team_config"]
+    worker_cfgs = cfg["workers"]
+    output_root = Path(state["output_root"])
+    _ensure_dir(output_root)
+
+    # Topology
+    upstream_map = _build_upstream_map(worker_cfgs)
+    topo_levels = _compute_topo_levels(upstream_map)
+
+    # Parameter ranges
+    param_ranges = {}
+    for k, v in cfg.get("param_ranges", DEFAULT_RANGES).items():
+        if isinstance(v, (list, tuple)):
+            param_ranges[k] = (float(v[0]), float(v[1]))
+        else:
+            param_ranges[k] = DEFAULT_RANGES.get(k, (0, 1))
+
+    # Initial centers/radii
+    initial_center = normalize_params(cfg.get("initial_param_center", {}), param_ranges)
+    initial_radius = dict(cfg.get("initial_radius", {}))
+    centers = {w["subbasin_id"]: dict(initial_center) for w in worker_cfgs}
+    radii = {w["subbasin_id"]: dict(initial_radius) for w in worker_cfgs}
+
+    # Phase pipeline
+    phase_pipeline = load_phase_pipeline(cfg)
+    max_rounds = state.get("max_rounds", 0) or get_total_max_rounds(phase_pipeline)
+
+    # Objective weights and stop rules
+    objective_weights = cfg.get("objective_weights", {"mean_nse": 0.90, "consistency": 0.10})
+    stop_rules = cfg.get("stop_rules", {
+        "outlet_nse_target": 0.85, "min_improvement": 0.003, "patience_rounds": 3,
+    })
+
+    # MC config
+    mc_cfg = cfg.get("multi_candidate", {})
+
+    # Phase NSE thresholds
+    phase_nse_thresholds = cfg.get("phase_config", {}).get("phase_nse_thresholds", {})
+
+    # Direction history init
+    direction_history = {w["subbasin_id"]: {} for w in worker_cfgs}
+
+    # Worker memories init
+    worker_memories = {
+        w["subbasin_id"]: WorkerMemory(
+            w["subbasin_id"], w.get("station_code", w["subbasin_id"])
+        ).to_checkpoint()
+        for w in worker_cfgs
+    }
+
+    # Save run manifest
+    _write_json(output_root / "run_manifest.json", {
+        "team_config": state.get("team_config_path", ""),
+        "output_root": str(output_root),
+        "mode": state.get("mode", "simulate"),
+        "max_rounds": max_rounds,
+        "objective_weights": objective_weights,
+        "stop_rules": stop_rules,
+        "initial_phase": phase_pipeline[0]["name"] if phase_pipeline else "VIC_ONLY",
+        "phase_pipeline": phase_pipeline,
+        "initial_centers": centers,
+        "initial_radii": radii,
+        "topo_levels": topo_levels,
+        "start_time_utc": _utc_now(),
+    })
+
+    # Initialize shared objects
+    _SHARED.clear()
+
+    print(f"  Calibration initialized: {len(worker_cfgs)} basins, "
+          f"{len(phase_pipeline)} phases, {max_rounds} total rounds")
+
+    return {
+        "worker_cfgs": worker_cfgs,
+        "upstream_map": upstream_map,
+        "full_upstream_map": cfg.get("full_upstream_map", {}),
+        "fixed_upstream_routing": {
+            e["subbasin_id"]: e for e in cfg.get("fixed_upstream_routing", [])
+        },
+        "topo_levels": topo_levels,
+        "param_ranges": param_ranges,
+        "objective_weights": objective_weights,
+        "stop_rules": stop_rules,
+        "phase_pipeline": phase_pipeline,
+        "phase_nse_thresholds": phase_nse_thresholds,
+        "max_rounds": max_rounds,
+        "max_parallel_workers": int(cfg.get("max_parallel_workers", 4)),
+        "centers": centers,
+        "radii": radii,
+        "direction_history": direction_history,
+        "current_phase_idx": 0,
+        "current_phase_name": phase_pipeline[0]["name"] if phase_pipeline else "VIC_ONLY",
+        "rounds_in_current_phase": 0,
+        "phase_history": [],
+        "round_id": 0,
+        "leader_memory_rounds": [],
+        "leader_j_history": [],
+        "leader_outlet_nse_history": [],
+        "leader_mean_sub_nse_history": [],
+        "leader_best_global": {"score": float("-inf"), "round_id": -1, "params_by_subbasin": {}},
+        "leader_latest_best_by_subbasin": {},
+        "leader_token_budget": int(cfg.get("leader_token_budget", 50000)),
+        "worker_memories": worker_memories,
+        "comm_totals": {"leader_to_worker": 0, "worker_to_leader": 0, "worker_to_worker": 0},
+        "mc_round_summaries": {},
+        "mc_vic_rounds": int(mc_cfg.get("vic_rounds", 0)),
+        "mc_rout_rounds": int(mc_cfg.get("rout_rounds", 0)),
+        "mc_n_candidates": int(mc_cfg.get("n_candidates", 5)),
+        "escape_states": {
+            wc["subbasin_id"]: {
+                "in_escape": False,
+                "tier": 0,
+                "agent_stagnation": 0,
+                "round_in_tier": 0,
+                "escape_best_nse": float("-inf"),
+                "escape_best_params": {},
+                "found_improvement_in_tier": False,
+            }
+            for wc in worker_cfgs
+        },
+        "decay_factor": 1.0,
+        "should_continue": True,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 2. check_exploration / run_exploration
+# ---------------------------------------------------------------------------
+
+def check_exploration(state: CalibrationState) -> Dict[str, Any]:
+    """Check if initial exploration is needed (pass-through node)."""
+    return {}
+
+
+def run_exploration(state: CalibrationState) -> Dict[str, Any]:
+    """Run initial exploration (pure code, zero LLM calls)."""
+    from .initial_explorer import run_initial_exploration, format_exploration_summary
+
+    shared = _get_shared(state)
+    cfg = state["team_config"]
+    explore_cfg = cfg.get("initial_exploration", {})
+    output_root = Path(state["output_root"])
+
+    # The explorer needs an orchestrator-like interface
+    # We create a lightweight adapter
+    class _ExplorerAdapter:
+        def __init__(self):
+            self.vic_executor = shared["vic_executor"]
+            self.workers = shared["workers"]
+            self.leader = shared["leader"]
+            self.worker_cfgs = state["worker_cfgs"]
+            self.centers = dict(state["centers"])
+            self.radii = dict(state["radii"])
+            self.param_ranges = state["param_ranges"]
+            self.upstream_map = state["upstream_map"]
+            self.topo_levels = state["topo_levels"]
+            self.current_phase = CalibrationPhase(state["current_phase_name"])
+            self.output_root = output_root
+            self.full_upstream_map = state.get("full_upstream_map", {})
+            self.fixed_upstream_routing = state.get("fixed_upstream_routing", {})
+
+        def _build_upstream_routing_info(self, sid):
+            return _build_upstream_routing_info(sid, state, self.worker_cfgs)
+
+        def _build_upstream_soil_info(self, sid):
+            return _build_upstream_soil_info(sid, state, self.worker_cfgs)
+
+    adapter = _ExplorerAdapter()
+
+    results = run_initial_exploration(
+        orchestrator=adapter,
+        n_near=int(explore_cfg.get("n_near", 10)),
+        n_random=int(explore_cfg.get("n_random", 20)),
+    )
+    summary = format_exploration_summary(results)
+
+    # Save summary
+    explore_out = {
+        sid: {"best_nse": r["best_nse"], "best_params": r["best_params"],
+              "n_samples": r["n_samples"], "summary": r["summary_text"]}
+        for sid, r in results.items()
+    }
+    _write_json(output_root / "initial_exploration.json", explore_out)
+
+    # Save full per-basin exploration results (all 31 samples)
+    explore_dir = output_root / "exploration"
+    _ensure_dir(explore_dir)
+    for sid, r in results.items():
+        _write_json(explore_dir / f"{sid}.json", {
+            "subbasin_id": sid,
+            "n_samples": r["n_samples"],
+            "best_nse": r["best_nse"],
+            "best_params": r["best_params"],
+            "samples": r.get("all_results", []),
+        })
+
+    return _to_native({
+        "exploration_results": explore_out,
+        "exploration_summary": summary,
+        "centers": state["centers"],
+    })
+
+
+
+# ---------------------------------------------------------------------------
+# 3. round_start
+# ---------------------------------------------------------------------------
+
+def round_start(state: CalibrationState) -> Dict[str, Any]:
+    """Begin a new calibration round."""
+    round_id = state.get("round_id", 0) + 1
+    max_rounds = state["max_rounds"]
+    is_final = (round_id >= max_rounds)
+    phase_name = state["current_phase_name"]
+    rounds_in_phase = state.get("rounds_in_current_phase", 0) + 1
+
+    # Compute decay factor (CRAv2: step-size decay)
+    DECAY_FLOORS = {"VIC_ONLY": 0.05, "ROUTING_ONLY": 0.30, "JOINT": 0.10}
+    DECAY_INITS  = {"VIC_ONLY": 1.00, "ROUTING_ONLY": 0.40, "JOINT": 0.15}
+    DECAY_BASE = 0.95
+    raw_decay = DECAY_INITS.get(phase_name, 1.0) * DECAY_BASE ** rounds_in_phase
+    decay_factor = max(DECAY_FLOORS.get(phase_name, 0.3), raw_decay)
+
+    print(f"\n{'='*60}")
+    print(f"  ROUND {round_id}/{max_rounds}  |  Phase: {phase_name}  |  decay={decay_factor:.3f}")
+    if is_final:
+        print(f"  ★ FINAL ROUND — using historical best params")
+    print(f"{'='*60}\n")
+
+    # Round directory
+    output_root = Path(state["output_root"])
+    round_dir = output_root / f"round_{round_id:03d}"
+    for subdir in ("tasks", "results", "messages"):
+        _ensure_dir(round_dir / subdir)
+
+    return {
+        "round_id": round_id,
+        "is_final_round": is_final,
+        "round_start_time": _utc_now(),
+        "round_dir": str(round_dir),
+        "rounds_in_current_phase": rounds_in_phase,
+        "decay_factor": decay_factor,
+        "current_level_idx": 0,
+        "round_worker_results": [],
+        "batch_worker_results": [],
+        "mc_round_summaries": dict(state.get("mc_round_summaries", {})),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 4. prepare_batch
+# ---------------------------------------------------------------------------
+
+def prepare_batch(state: CalibrationState) -> Dict[str, Any]:
+    """Prepare the current topo-level batch for execution."""
+    level_idx = state["current_level_idx"]
+    topo_levels = state["topo_levels"]
+
+    if level_idx >= len(topo_levels):
+        # No more levels — signal done
+        return {"current_batch_sids": []}
+
+    sids = topo_levels[level_idx]
+    print(f"  Batch {level_idx + 1}/{len(topo_levels)}: {sids}")
+
+    # Check multi-candidate
+    pipeline = state["phase_pipeline"]
+    phase_idx = state["current_phase_idx"]
+    rounds_in_phase = state["rounds_in_current_phase"]
+    use_multi, n_cands = should_use_multi_candidate(pipeline, phase_idx, rounds_in_phase)
+
+    if state.get("is_final_round", False):
+        use_multi = False
+
+    # R1 (no leader decision yet) → skip MC, use exact defaults
+    if use_multi and state.get("leader_decision") is None:
+        use_multi = False
+
+    if use_multi:
+        print(f"  [v2] Multi-candidate mode: {n_cands} candidates/basin")
+
+    return {
+        "current_batch_sids": sids,
+        "use_multi_candidate": use_multi,
+        "mc_n_candidates": n_cands,
+        "batch_worker_results": [],  # reset for this batch
+    }
+
+
+# ---------------------------------------------------------------------------
+# 5. execute_batch_workers (parallel via ThreadPoolExecutor)
+# ---------------------------------------------------------------------------
+
+def execute_batch_workers(state: CalibrationState) -> Dict[str, Any]:
+    """Execute all workers in the current batch in parallel.
+
+    Uses ThreadPoolExecutor for parallelism (same as original orchestrator).
+    This avoids Send() state-copy overhead.
+    """
+    sids = state.get("current_batch_sids", [])
+    if not sids:
+        return {"batch_worker_results": []}
+
+    round_id = state["round_id"]
+    shared = _get_shared(state)
+    vic_executor: VICExecutor = shared["vic_executor"]
+    worker_cfgs = state["worker_cfgs"]
+    phase = CalibrationPhase(state["current_phase_name"])
+    force_best = state.get("is_final_round", False)
+    use_multi = state.get("use_multi_candidate", False) and not force_best
+    max_parallel = state.get("max_parallel_workers", 4)
+    round_dir = Path(state["round_dir"])
+
+    batch_results = []
+    mc_lines = []
+
+    def _run_one_worker(sid):
+        worker: WorkerAgent = shared["workers"][sid]
+        center = state["centers"][sid]
+        radius = state["radii"][sid]
+
+        # Restore worker memory
+        wmem_data = state.get("worker_memories", {}).get(sid)
+        if wmem_data:
+            worker.memory = WorkerMemory.from_checkpoint(wmem_data)
+
+        # Leader guidance
+        prev_decision = state.get("leader_decision")
+        guidance = None
+        if prev_decision:
+            guidance = shared["leader"].get_worker_guidance(prev_decision, sid)
+
+        # Anti-flip
+        raw_hints = guidance.get("param_adjustments", []) if guidance else []
+        direction_history = state.get("direction_history", {})
+        prev_improved = False
+        if round_id > 1:
+            ledger_path = Path(state["output_root"]) / f"{sid}_ledger.jsonl"
+            if ledger_path.exists():
+                last_line = ""
+                with open(ledger_path) as _lf:
+                    for last_line in _lf:
+                        pass
+                if last_line.strip():
+                    try:
+                        prev_improved = json.loads(last_line).get("improved", False)
+                    except json.JSONDecodeError:
+                        pass
+        filtered_hints, _ = _apply_anti_flip(direction_history, sid, raw_hints, prev_improved)
+
+        if guidance:
+            guidance = dict(guidance)
+            guidance["param_adjustments"] = filtered_hints
+
+        # Upstream info
+        up_routing_info = _build_upstream_routing_info(sid, state, worker_cfgs)
+        up_soil_info = _build_upstream_soil_info(sid, state, worker_cfgs)
+
+        # Escape state check (CRAv2)
+        esc = state.get("escape_states", {}).get(sid, {})
+        escape_info = None
+        if esc.get("in_escape", False):
+            escape_info = _get_escape_params(esc)
+
+        cur_decay = state.get("decay_factor", 1.0)
+
+        # R1 (no leader decision yet) → exact defaults, skip MC even if enabled
+        if use_multi and not escape_info and prev_decision is not None:
+            result, mc_line = _run_worker_multi(
+                worker, vic_executor, round_id, center, radius,
+                guidance, round_dir, state.get("mc_n_candidates", 5),
+                phase, up_routing_info, up_soil_info,
+                decay_factor=cur_decay,
+            )
+            return result, mc_line
+        else:
+            result = _run_worker_single(
+                worker, vic_executor, round_id, center, radius,
+                guidance, round_dir, phase, up_routing_info, up_soil_info,
+                force_best=force_best,
+                escape_info=escape_info,
+                decay_factor=cur_decay,
+            )
+            return result, ""
+
+    with ThreadPoolExecutor(max_workers=max_parallel) as pool:
+        futures = {pool.submit(_run_one_worker, sid): sid for sid in sids}
+        for future in as_completed(futures):
+            sid = futures[future]
+            try:
+                result, mc_line = future.result()
+                batch_results.append(result)
+                if mc_line:
+                    mc_lines.append(mc_line)
+                nse = result.get("metrics", {}).get("NSE", float("nan"))
+                print(f"    Worker {sid}: NSE={nse:.4f}, score={result.get('score_local', 0):.4f}"
+                      f"{'  [MC]' if use_multi else ''}")
+            except Exception as e:
+                logger.error("Worker %s failed: %s\n%s", sid, e, traceback.format_exc())
+                batch_results.append({
+                    "subbasin_id": sid,
+                    "station_code": "",
+                    "agent_id": f"worker_{sid}",
+                    "best_params": state["centers"][sid],
+                    "params": state["centers"][sid],
+                    "metrics": {"NSE": float("nan"), "RMSE": float("nan"),
+                               "PBIAS": float("nan")},
+                    "score_local": float("-inf"),
+                    "analysis": f"Worker failed: {e}",
+                    "llm_tokens": {"prompt": 0, "completion": 0, "total": 0},
+                    "duration_sec": 0,
+                })
+
+    # Store MC summaries
+    mc_summaries = dict(state.get("mc_round_summaries", {}))
+    if mc_lines:
+        prev = mc_summaries.get(round_id, "")
+        mc_summaries[round_id] = (prev + "\n" + "\n".join(mc_lines)).strip()
+
+    return _to_native({
+        "batch_worker_results": batch_results,
+        "mc_round_summaries": mc_summaries,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Escape helpers (CRAv2)
+# ---------------------------------------------------------------------------
+
+def _get_escape_params(esc: Dict) -> Dict:
+    """Return escape perturbation config based on current tier."""
+    tier = esc.get("tier", 1)
+    n_active = 6  # approximate; actual count determined by phase in executor
+    if tier == 1:
+        return {"tier": 1, "perturbation_pct": 0.10,
+                "n_params_to_perturb": max(1, n_active // 2)}
+    elif tier == 2:
+        return {"tier": 2, "perturbation_pct": 0.15,
+                "n_params_to_perturb": max(1, n_active // 2 + 1)}
+    else:
+        round_in_tier = esc.get("round_in_tier", 0)
+        return {"tier": 3, "perturbation_pct": 0.20 + 0.01 * round_in_tier,
+                "n_params_to_perturb": 0}  # 0 = all params
+
+
+def _update_escape_state(esc: Dict, nse: float, params: Dict,
+                         hist_best_nse: float) -> str:
+    """Update per-station escape state after a round. Returns event string."""
+    STAGNATION_TRIGGER = 10
+    TIER_ROUNDS = 5
+    IMPROVEMENT_THRESHOLD = 0.001
+
+    if not esc.get("in_escape", False):
+        improved = nse > hist_best_nse + IMPROVEMENT_THRESHOLD
+        if improved:
+            esc["agent_stagnation"] = 0
+        else:
+            esc["agent_stagnation"] = esc.get("agent_stagnation", 0) + 1
+            if esc["agent_stagnation"] >= STAGNATION_TRIGGER:
+                esc["in_escape"] = True
+                esc["tier"] = 1
+                esc["round_in_tier"] = 0
+                esc["escape_best_nse"] = hist_best_nse
+                esc["escape_best_params"] = dict(params)
+                esc["found_improvement_in_tier"] = False
+                return "ENTER_ESCAPE"
+    else:
+        escape_improved = nse > esc.get("escape_best_nse", float("-inf")) + IMPROVEMENT_THRESHOLD
+        if escape_improved:
+            esc["escape_best_nse"] = nse
+            esc["escape_best_params"] = dict(params)
+            esc["found_improvement_in_tier"] = True
+        esc["round_in_tier"] = esc.get("round_in_tier", 0) + 1
+
+        tier = esc.get("tier", 1)
+        if tier <= 2 and esc["round_in_tier"] >= TIER_ROUNDS:
+            if esc.get("found_improvement_in_tier", False):
+                esc["in_escape"] = False
+                esc["tier"] = 0
+                esc["agent_stagnation"] = 0
+                return f"EXIT_ESCAPE T{tier} improved"
+            else:
+                esc["tier"] = tier + 1
+                esc["round_in_tier"] = 0
+                esc["found_improvement_in_tier"] = False
+                return f"TIER_UP {tier}→{tier + 1}"
+        elif tier >= 3:
+            if nse > hist_best_nse + IMPROVEMENT_THRESHOLD:
+                esc["in_escape"] = False
+                esc["tier"] = 0
+                esc["agent_stagnation"] = 0
+                return "EXIT_ESCAPE T3 found historical best"
+    return ""
+
+
+def _run_worker_single(
+    worker, vic_executor, round_id, center, radius, guidance,
+    round_dir, phase, up_routing, up_soil, force_best=False,
+    escape_info=None, decay_factor=1.0,
+) -> Dict:
+    """Run a single-candidate worker round (CRAv2: pure code, no LLM)."""
+    sid = worker.subbasin_id
+    t0 = dt.datetime.now(dt.timezone.utc)
+    locked_keys = set(get_locked_keys(phase))
+    phase_str = phase.value
+    worker_tokens = {"prompt": 0, "completion": 0, "total": 0}
+    analysis = "1-candidate run."
+
+    if force_best:
+        best_record = worker.ledger.get_best_params()
+        if best_record and best_record.get("params"):
+            candidate_list = [dict(best_record["params"])]
+        else:
+            candidate_list = [dict(center)]
+        analysis = "force_best: using historical best params."
+    elif escape_info:
+        # Escape mode: random perturbation based on tier
+        candidate_list = worker.executor.generate_escape_candidates(
+            base_params=center,
+            phase=phase_str,
+            perturbation_pct=escape_info["perturbation_pct"],
+            n_params_to_perturb=escape_info["n_params_to_perturb"],
+        )
+        analysis = f"escape T{escape_info.get('tier', '?')}: pct={escape_info['perturbation_pct']:.0%}"
+    else:
+        # Normal mode: execute Leader instruction via code lookup table
+        leader_instruction = guidance if guidance else {"param_adjustments": []}
+        if not leader_instruction.get("param_adjustments"):
+            # Round 1 or no guidance: use exact center with zero noise
+            candidate_list = [dict(center)]
+            analysis = "exact center (no guidance, no noise)"
+        else:
+            candidate_list = worker.execute_instruction(
+                leader_instruction=leader_instruction,
+                phase=phase_str,
+                radius=radius,
+                decay_factor=decay_factor,
+            )
+            analysis = f"code execute_instruction, decay={decay_factor:.3f}"
+
+    for cand in candidate_list:
+        for k in locked_keys:
+            cand[k] = center.get(k, cand.get(k, 0))
+        cand.update(normalize_params(cand, worker.ranges))
+
+    params = candidate_list[0]
+    ok, metrics = vic_executor.run(
+        subbasin_id=sid,
+        run_id=round_id * 100 + 1,
+        candidate_id=1,
+        params=params,
+        phase_tag=f"round_{round_id}_c1",
+        upstream_routing_info=up_routing,
+        upstream_soil_info=up_soil,
+    )
+    score = ok and _score_row(metrics) or float("-inf")
+    duration = (dt.datetime.now(dt.timezone.utc) - t0).total_seconds()
+
+    # Save routing result
+    vic_cfg = vic_executor._vic_configs.get(sid)
+    if ok and vic_cfg:
+        src = Path(vic_cfg.base_output_dir) / f"{sid}_calibration_ai" / "current_run" / "routing_result"
+        if src.exists():
+            dst = round_dir / "routing_result" / sid
+            if dst.exists():
+                shutil.rmtree(dst)
+            shutil.copytree(str(src), str(dst))
+
+    _write_json(round_dir / "results" / f"worker_{sid}.json", {
+        "round_id": round_id, "subbasin_id": sid,
+        "result": {"params": params, "metrics": metrics, "ok": ok, "score_local": round(score, 6)},
+        "llm_tokens": worker_tokens,
+        "duration_sec": round(duration, 3),
+    })
+
+    return {
+        "subbasin_id": sid,
+        "station_code": worker.station_code,
+        "agent_id": worker.agent_id,
+        "best_params": params,
+        "params": params,
+        "metrics": metrics,
+        "score_local": round(score, 6),
+        "analysis": analysis,
+        "llm_tokens": worker_tokens,
+        "duration_sec": round(duration, 3),
+    }
+
+
+def _run_worker_multi(
+    worker, vic_executor, round_id, center, radius, guidance,
+    round_dir, n_candidates, phase, up_routing, up_soil,
+    decay_factor=1.0,
+) -> Tuple[Dict, str]:
+    """Run multi-candidate worker round. Mirrors run_worker_round_multi()."""
+    from .worker_state import WorkerExecutor, MAGNITUDE_FRACTION
+
+    MC_STEP_SCALES = [
+        (0.3, "conservative"), (0.7, "moderate"), (1.0, "normal"),
+        (1.5, "bold"), (-0.5, "reverse"),
+    ]
+
+    sid = worker.subbasin_id
+    t0 = dt.datetime.now(dt.timezone.utc)
+    locked_keys = set(get_locked_keys(phase))
+    phase_str = phase.value
+
+    adjustments = []
+    if guidance and guidance.get("param_adjustments"):
+        adjustments = guidance["param_adjustments"]
+
+    executor = WorkerExecutor(param_ranges=worker.ranges)
+    active_keys = executor._get_active_keys(phase_str)
+
+    instructions = {}
+    for adj in adjustments:
+        param = adj.get("param", adj.get("parameter", adj.get("parameter_name",
+                adj.get("param_name", adj.get("name", "")))))
+        direction = adj.get("direction", "hold")
+        magnitude = adj.get("magnitude", "none")
+        if param not in active_keys:
+            continue
+        if direction == "hold" or magnitude in ("none", "0", 0):
+            continue
+        sign = 1.0 if direction == "increase" else -1.0
+        frac = MAGNITUDE_FRACTION.get(str(magnitude).lower(), 0.1)
+        instructions[param] = (sign, frac)
+
+    best_record = worker.ledger.get_best_params()
+    base_params = dict(best_record["params"]) if (best_record and best_record.get("params")) else dict(center)
+
+    # All candidates are base_params + delta × scale (anchored to historical best)
+    import random as _random
+    candidates = []
+    scales = MC_STEP_SCALES[:n_candidates]
+    for scale_factor, label in scales:
+        cand = dict(base_params)
+        for key in active_keys:
+            if key not in base_params:
+                continue
+            lo, hi = executor.ranges.get(key, (0, 1))
+            param_range = hi - lo
+            if key in instructions:
+                sign, frac = instructions[key]
+                step = sign * param_range * frac * decay_factor * scale_factor
+                noise = _random.gauss(0, param_range * 0.01)
+                new_val = base_params[key] + step + noise
+            else:
+                noise = _random.gauss(0, param_range * 0.005)
+                new_val = base_params[key] + noise
+            cand[key] = max(lo, min(hi, new_val))
+        for k in locked_keys:
+            cand[k] = center.get(k, cand.get(k, 0))
+        cand.update(normalize_params(cand, worker.ranges))
+        candidates.append((cand, label, scale_factor))
+
+    eval_results = []
+    vic_cfg = vic_executor._vic_configs.get(sid)
+    for i, (params, label, scale) in enumerate(candidates):
+        ok, metrics = vic_executor.run(
+            subbasin_id=sid,
+            run_id=round_id * 100 + i + 1,
+            candidate_id=i + 1,
+            params=params,
+            phase_tag=f"round_{round_id}_mc{i+1}_{label}",
+            upstream_routing_info=up_routing,
+            upstream_soil_info=up_soil,
+        )
+        # Save this candidate's routing result before next run overwrites it
+        if ok and vic_cfg:
+            src = Path(vic_cfg.base_output_dir) / f"{sid}_calibration_ai" / "current_run" / "routing_result"
+            if src.exists():
+                dst = round_dir / "routing_result" / sid / f"c{i+1}_{label}"
+                if dst.exists():
+                    shutil.rmtree(dst)
+                shutil.copytree(str(src), str(dst))
+        nse = metrics.get("NSE", float("-inf")) if ok else float("-inf")
+        score = ok and _score_row(metrics) or float("-inf")
+        eval_results.append({
+            "idx": i, "params": params, "metrics": metrics,
+            "ok": ok, "score": score, "nse": nse, "label": label, "scale": scale,
+        })
+
+    eval_results.sort(key=lambda x: x["score"], reverse=True)
+    best = eval_results[0]
+
+    step_parts = [f"×{r['scale']:.1f}({r['label']})→{r['nse']:.3f}"
+                  for r in sorted(eval_results, key=lambda x: x["scale"])]
+    summary_line = f"{sid}: best={best['label']}(×{best['scale']:.1f}), " + ", ".join(step_parts)
+
+    duration = (dt.datetime.now(dt.timezone.utc) - t0).total_seconds()
+
+    result = {
+        "subbasin_id": sid,
+        "station_code": worker.station_code,
+        "agent_id": worker.agent_id,
+        "best_params": best["params"],
+        "params": best["params"],
+        "metrics": best["metrics"],
+        "score_local": round(best["score"], 6),
+        "analysis": f"MC({len(candidates)}): best={best['label']}(×{best['scale']:.1f})",
+        "llm_tokens": {"prompt": 0, "completion": 0, "total": 0},
+        "duration_sec": round(duration, 3),
+    }
+
+    _ensure_dir(round_dir / "results")
+    _write_json(round_dir / "results" / f"worker_{sid}.json", {
+        "round_id": round_id, "subbasin_id": sid,
+        "result": {"params": best["params"], "metrics": best["metrics"],
+                   "ok": best["ok"], "score_local": round(best["score"], 6)},
+        "mc_detail": [{"label": r["label"], "scale": r["scale"],
+                       "nse": r["nse"], "score": r["score"]}
+                      for r in eval_results],
+        "llm_tokens": {"prompt": 0, "completion": 0, "total": 0},
+        "duration_sec": round(duration, 3),
+    })
+
+    return result, summary_line
+
+
+# ---------------------------------------------------------------------------
+# 6. collect_batch_results
+# ---------------------------------------------------------------------------
+
+def collect_batch_results(state: CalibrationState) -> Dict[str, Any]:
+    """Collect batch results, update centers and escape states (CRAv2)."""
+    batch_results = list(state.get("batch_worker_results", []))
+    round_results = list(state.get("round_worker_results", []))
+    round_results.extend(batch_results)
+
+    # Inter-batch center update
+    centers = dict(state["centers"])
+    locked_keys = set(get_locked_keys(CalibrationPhase(state["current_phase_name"])))
+    param_ranges = state["param_ranges"]
+
+    # Update latest_best and centers
+    latest_best = dict(state.get("leader_latest_best_by_subbasin", {}))
+    shared = _get_shared(state)
+
+    # Deep-copy escape states for mutation
+    escape_states = {k: dict(v) for k, v in state.get("escape_states", {}).items()}
+
+    for result in batch_results:
+        bsid = result["subbasin_id"]
+        bnse = result.get("metrics", {}).get("NSE", float("-inf"))
+        worker = shared["workers"].get(bsid)
+
+        # Restore worker memory for ledger
+        wmem_data = state.get("worker_memories", {}).get(bsid)
+        if wmem_data and worker:
+            worker.memory = WorkerMemory.from_checkpoint(wmem_data)
+
+        worker_best = worker.ledger.get_best_nse() if worker else float("-inf")
+        if bnse >= worker_best:
+            new_c = normalize_params(result.get("best_params", centers[bsid]), param_ranges)
+            for k in locked_keys:
+                new_c[k] = centers[bsid].get(k, new_c.get(k, 0))
+            centers[bsid] = new_c
+
+        # Update latest_best
+        prev_best = latest_best.get(bsid, {})
+        prev_nse = prev_best.get("metrics", {}).get("NSE", float("-inf"))
+        if bnse >= prev_nse or not prev_best:
+            latest_best[bsid] = {
+                "round_id": state["round_id"],
+                "params": result.get("best_params", result.get("params", {})),
+                "metrics": result.get("metrics", {}),
+            }
+
+        # Update escape state (CRAv2)
+        esc = escape_states.get(bsid)
+        if esc is not None:
+            result_params = result.get("best_params", result.get("params", {}))
+            event = _update_escape_state(esc, bnse, result_params, worker_best)
+            if event:
+                print(f"    [{bsid}] Escape: {event}")
+
+    return _to_native({
+        "round_worker_results": round_results,
+        "centers": centers,
+        "leader_latest_best_by_subbasin": latest_best,
+        "escape_states": escape_states,
+        "batch_worker_results": [],  # clear for next batch
+    })
+
+
+# ---------------------------------------------------------------------------
+# 7. inter_batch_center_update (implicit in collect_batch_results)
+# ---------------------------------------------------------------------------
+
+def check_more_batches(state: CalibrationState) -> str:
+    """Conditional edge: check if there are more topo levels to process.
+
+    Note: advance_batch already incremented current_level_idx,
+    so we check if the current index is still within bounds.
+    """
+    current_idx = state["current_level_idx"]
+    if current_idx < len(state["topo_levels"]):
+        return "prepare_batch"
+    return "post_round_diagnostics"
+
+
+def advance_batch(state: CalibrationState) -> Dict[str, Any]:
+    """Move to the next topo level."""
+    return {"current_level_idx": state["current_level_idx"] + 1}
+
+
+# ---------------------------------------------------------------------------
+# 8. post_round_diagnostics
+# ---------------------------------------------------------------------------
+
+def post_round_diagnostics(state: CalibrationState) -> Dict[str, Any]:
+    """Run worker diagnostics and cross-basin coordination."""
+    shared = _get_shared(state)
+    workers = shared["workers"]
+    coordinator: LeaderCoordinator = shared["coordinator"]
+    worker_results = state["round_worker_results"]
+    result_by_sid = {r["subbasin_id"]: r for r in worker_results}
+    upstream_map = state["upstream_map"]
+    round_id = state["round_id"]
+
+    diagnostic_reports = []
+    for result in worker_results:
+        sid = result["subbasin_id"]
+        worker = workers.get(sid)
+        if not worker:
+            continue
+
+        # Restore memory
+        wmem_data = state.get("worker_memories", {}).get(sid)
+        if wmem_data:
+            worker.memory = WorkerMemory.from_checkpoint(wmem_data)
+
+        prev_metrics = None
+        last_entry = worker.ledger.get_last_entry() if hasattr(worker.ledger, 'get_last_entry') else None
+        if last_entry:
+            prev_metrics = last_entry.get("metrics")
+
+        is_headwater = len(upstream_map.get(sid, [])) == 0
+        upstream_quality = "good"
+        for up_sid in upstream_map.get(sid, []):
+            up_result = result_by_sid.get(up_sid, {})
+            up_nse = up_result.get("metrics", {}).get("NSE", 0)
+            if isinstance(up_nse, (int, float)) and up_nse < 0.5:
+                upstream_quality = "poor"
+                break
+
+        report = worker.report_diagnostics(
+            metrics=result.get("metrics", {}),
+            prev_metrics=prev_metrics,
+            context={"is_headwater": is_headwater, "upstream_quality": upstream_quality},
+        )
+        diagnostic_reports.append(report)
+
+    # Cross-basin insights
+    coordinator_summaries = []
+    for report in diagnostic_reports:
+        diag = report.get("diagnosis", {})
+        ledger = report.get("ledger_summary", {})
+        coordinator_summaries.append({
+            "subbasin_id": report.get("subbasin_id"),
+            "current_nse": report.get("current_metrics", {}).get("NSE"),
+            "primary_issue": diag.get("primary_issue", "none"),
+            "improvement_trend": diag.get("improvement_trend", "?"),
+            "stagnation_risk": ledger.get("stagnation_count", 0) >= 3,
+            "stagnation_count": ledger.get("stagnation_count", 0),
+            "top_recommendations": [
+                f"{r['param']} {r['direction']}" for r in diag.get("recommendations", [])[:3]
+            ],
+            "suggested_direction": diag.get("reasoning", ""),
+            "routing_responsibility": diag.get("routing_responsibility", 0),
+        })
+
+    coordination_result = coordinator.compute_cross_basin_insights(coordinator_summaries)
+
+    # NSE history by basin
+    nse_history_by_basin = coordinator.build_nse_history_by_basin(
+        state.get("leader_memory_rounds", [])
+    )
+
+    diagnostics_prompt_block = coordinator.format_diagnostics_for_leader(
+        diagnostic_reports=diagnostic_reports,
+        coordination=coordination_result,
+        j_history=state.get("leader_j_history", []),
+        nse_history_by_basin=nse_history_by_basin,
+    )
+
+    # Inject exploration summary for round 1
+    diag_block = diagnostics_prompt_block or ""
+    if round_id <= 1 and state.get("exploration_summary", ""):
+        diag_block = state["exploration_summary"] + "\n\n" + diag_block
+
+    # Inject MC summary
+    mc_summary = state.get("mc_round_summaries", {}).get(round_id, "")
+    if mc_summary:
+        diag_block += "\n\n### Multi-Candidate Step-Size Response\n" + mc_summary
+
+    return {
+        "diagnostic_reports": diagnostic_reports,
+        "diagnostics_prompt_block": diag_block,
+        "coordination_result": coordination_result.to_dict() if hasattr(coordination_result, 'to_dict') else {},
+    }
+
+
+# ---------------------------------------------------------------------------
+# 9. leader_review (stateless — no conversation accumulation)
+# ---------------------------------------------------------------------------
+
+def leader_review(state: CalibrationState) -> Dict[str, Any]:
+    """Have Leader LLM review the round. Stateless — no conversation history."""
+    shared = _get_shared(state)
+    leader: LeaderAgent = shared["leader"]
+    round_id = state["round_id"]
+    worker_results = state["round_worker_results"]
+    phase = CalibrationPhase(state["current_phase_name"])
+
+    # Restore leader memory from state
+    leader.memory = LeaderMemory()
+    leader.memory.rounds = list(state.get("leader_memory_rounds", []))
+    leader.memory.j_history = list(state.get("leader_j_history", []))
+    leader.memory.outlet_nse_history = list(state.get("leader_outlet_nse_history", []))
+    leader.memory.mean_sub_nse_history = list(state.get("leader_mean_sub_nse_history", []))
+    leader.memory.best_global = dict(state.get("leader_best_global", {
+        "score": float("-inf"), "round_id": -1, "params_by_subbasin": {}
+    }))
+    leader.memory.latest_best_by_subbasin = dict(state.get("leader_latest_best_by_subbasin", {}))
+
+    # Build prompt with token budget
+    diag_block = state.get("diagnostics_prompt_block", "")
+
+    # Use ContextManager for token budget
+    ctx = ContextManager(budget=state.get("leader_token_budget", 50000))
+
+    review_prompt, system_prompt, j_total, outlet_nse, mean_sub_nse, consistency = \
+        leader.build_review_prompt(
+            round_id=round_id,
+            worker_results=worker_results,
+            current_center=state["centers"],
+            current_radius=state["radii"],
+            phase=phase,
+            rounds_in_current_phase=state["rounds_in_current_phase"],
+            diagnostics_block=diag_block if diag_block.strip() else None,
+        )
+
+    # Call LLM (stateless — single-turn, no conversation history)
+    print(f"\n  Leader reviewing round {round_id}...")
+    decision = None
+    leader_tokens = {"prompt": 0, "completion": 0, "total": 0}
+    try:
+        llm_resp = leader.llm.chat(
+            messages=[{"role": "user", "content": review_prompt}],
+            system=system_prompt,
+        )
+        leader_tokens = {
+            "prompt": llm_resp.prompt_tokens,
+            "completion": llm_resp.completion_tokens,
+            "total": llm_resp.total_tokens,
+        }
+        decision = llm_resp.parsed
+        if decision is not None:
+            validation = validate_leader_output(decision)
+            if not validation.is_valid:
+                logger.warning("Leader output validation failed: %s", validation.errors)
+                decision = None
+            else:
+                if "round_id" not in decision:
+                    decision["round_id"] = round_id
+                if decision.get("stop_or_continue") not in ("continue", "stop"):
+                    decision["stop_or_continue"] = "continue"
+        if decision is None:
+            logger.warning("Leader LLM returned non-JSON. Using fallback.")
+    except Exception as e:
+        logger.error("Leader LLM call failed: %s. Using fallback.", e)
+
+    if decision is None:
+        decision = leader._fallback_decision(
+            round_id, worker_results, j_total, outlet_nse, mean_sub_nse, phase=phase,
+        )
+
+    # Update leader memory in state
+    leader.memory.add_round(
+        round_id=round_id,
+        worker_results=worker_results,
+        j_total=j_total,
+        outlet_nse=outlet_nse,
+        mean_sub_nse=mean_sub_nse,
+        consistency_penalty=consistency,
+        leader_decision=decision,
+    )
+
+    print(f"  Leader: J_total={j_total:.5f}, outlet_NSE={outlet_nse:.4f}, "
+          f"mean_sub_NSE={mean_sub_nse:.4f}")
+    print(f"  Strategy: {decision.get('next_round_strategy', 'N/A')}")
+
+    return {
+        "leader_decision": decision,
+        "leader_memory_rounds": leader.memory.rounds,
+        "leader_j_history": leader.memory.j_history,
+        "leader_outlet_nse_history": leader.memory.outlet_nse_history,
+        "leader_mean_sub_nse_history": leader.memory.mean_sub_nse_history,
+        "leader_best_global": leader.memory.best_global,
+        "leader_latest_best_by_subbasin": leader.memory.latest_best_by_subbasin,
+        "leader_tokens": leader_tokens,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 10. update_search_state
+# ---------------------------------------------------------------------------
+
+def update_search_state(state: CalibrationState) -> Dict[str, Any]:
+    """Update per-basin centers, radii, and direction history."""
+    shared = _get_shared(state)
+    leader: LeaderAgent = shared["leader"]
+    workers = shared["workers"]
+    decision = state["leader_decision"]
+    worker_results = state["round_worker_results"]
+    phase = CalibrationPhase(state["current_phase_name"])
+    locked_keys = set(get_locked_keys(phase))
+    param_ranges = state["param_ranges"]
+
+    centers = dict(state["centers"])
+    radii = dict(state["radii"])
+    direction_history = dict(state.get("direction_history", {}))
+
+    result_by_sid = {r["subbasin_id"]: r for r in worker_results}
+    for sid in workers:
+        result = result_by_sid.get(sid)
+        if not result:
+            continue
+
+        new_nse = result.get("metrics", {}).get("NSE", float("-inf"))
+        worker_best = workers[sid].ledger.get_best_nse()
+
+        if new_nse >= worker_best:
+            new_center = normalize_params(
+                result.get("best_params", centers[sid]), param_ranges,
+            )
+            for k in locked_keys:
+                new_center[k] = centers[sid].get(k, new_center.get(k, 0))
+            centers[sid] = new_center
+
+        # Radius adjustment
+        guidance = leader.get_worker_guidance(decision, sid)
+        if guidance:
+            hint = guidance.get("search_radius_hint", "keep")
+            if hint == "shrink":
+                radii[sid] = {k: v * 0.8 for k, v in radii[sid].items()}
+            elif hint == "expand":
+                radii[sid] = {
+                    k: min(v * 1.3, (param_ranges.get(k, (0, 1))[1] - param_ranges.get(k, (0, 1))[0]) * 0.5)
+                    for k, v in radii[sid].items()
+                }
+
+        # Anti-flip direction update
+        raw_hints = guidance.get("param_adjustments", []) if guidance else []
+        improved = new_nse >= worker_best
+        _, direction_history = _apply_anti_flip(direction_history, sid, raw_hints, improved)
+
+    return {
+        "centers": centers,
+        "radii": radii,
+        "direction_history": direction_history,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 11. record_round
+# ---------------------------------------------------------------------------
+
+def record_round(state: CalibrationState) -> Dict[str, Any]:
+    """Record round results: worker memories, ledger, round outputs."""
+    shared = _get_shared(state)
+    leader: LeaderAgent = shared["leader"]
+    workers = shared["workers"]
+    decision = state["leader_decision"]
+    worker_results = state["round_worker_results"]
+    round_id = state["round_id"]
+    round_dir = Path(state["round_dir"])
+    phase = CalibrationPhase(state["current_phase_name"])
+
+    # Record worker rounds
+    worker_memories = dict(state.get("worker_memories", {}))
+    for result in worker_results:
+        sid = result["subbasin_id"]
+        worker = workers.get(sid)
+        if not worker:
+            continue
+
+        # Restore memory
+        wmem_data = worker_memories.get(sid)
+        if wmem_data:
+            worker.memory = WorkerMemory.from_checkpoint(wmem_data)
+
+        guidance = leader.get_worker_guidance(decision, sid)
+        worker.record_round(
+            round_id=round_id,
+            best_params=result.get("best_params", {}),
+            metrics=result.get("metrics", {}),
+            score_local=result.get("score_local", 0),
+            leader_guidance=guidance,
+            analysis=result.get("analysis", ""),
+            phase=phase.value,
+        )
+        worker_memories[sid] = worker.memory.to_checkpoint()
+
+    # Write round outputs
+    j_total = state["leader_j_history"][-1] if state.get("leader_j_history") else 0
+    outlet_nse = state["leader_outlet_nse_history"][-1] if state.get("leader_outlet_nse_history") else 0
+    mean_sub_nse = state["leader_mean_sub_nse_history"][-1] if state.get("leader_mean_sub_nse_history") else 0
+
+    # Worker-to-worker messages
+    comm_totals = dict(state.get("comm_totals", {}))
+    worker_cfg_by_sid = {w["subbasin_id"]: w for w in state["worker_cfgs"]}
+    result_by_sid = {r["subbasin_id"]: r for r in worker_results}
+
+    for w_cfg in state["worker_cfgs"]:
+        sid = w_cfg["subbasin_id"]
+        for ds in w_cfg.get("neighbors_downstream", []):
+            result = result_by_sid.get(sid, {})
+            msg = {
+                "round_id": round_id,
+                "direction": "worker_to_worker",
+                "from_subbasin": sid,
+                "to_subbasin": ds,
+                "upstream_locked_params": result.get("best_params", {}),
+            }
+            _write_json(round_dir / "messages" / f"{sid}_to_{ds}.json", msg)
+            comm_totals["worker_to_worker"] = comm_totals.get("worker_to_worker", 0) + 1
+
+    for result in worker_results:
+        sid = result["subbasin_id"]
+        _write_json(round_dir / "messages" / f"{sid}_to_leader.json", {
+            "round_id": round_id,
+            "direction": "worker_to_leader",
+            "from_subbasin": sid,
+            "best_params": result.get("best_params", {}),
+            "metrics": result.get("metrics", {}),
+            "score_local": result.get("score_local", 0),
+        })
+        comm_totals["worker_to_leader"] = comm_totals.get("worker_to_leader", 0) + 1
+
+    # Leader decision markdown
+    _write_leader_decision_md(round_dir, round_id, j_total, outlet_nse, mean_sub_nse, decision)
+
+    # Round meta
+    meta = {
+        "round_id": round_id,
+        "phase": phase.value,
+        "start_time_utc": state.get("round_start_time", ""),
+        "end_time_utc": _utc_now(),
+        "j_total": round(j_total, 6),
+        "outlet_nse": round(outlet_nse, 4),
+        "mean_sub_nse": round(mean_sub_nse, 4),
+        "decision": decision.get("stop_or_continue", "continue"),
+        "strategy": decision.get("next_round_strategy", ""),
+    }
+    # Include token usage if available
+    leader_tok = state.get("leader_tokens", {})
+    if leader_tok and leader_tok.get("total", 0) > 0:
+        meta["leader_tokens"] = leader_tok
+    # Collect worker tokens from results
+    worker_tok_list = []
+    for wr in worker_results:
+        wt = wr.get("llm_tokens")
+        if wt and wt.get("total", 0) > 0:
+            worker_tok_list.append({"subbasin": wr["subbasin_id"], **wt})
+    if worker_tok_list:
+        meta["worker_tokens"] = worker_tok_list
+    _write_json(round_dir / "round_meta.json", meta)
+
+    return {
+        "worker_memories": worker_memories,
+        "comm_totals": comm_totals,
+    }
+
+
+def _write_leader_decision_md(round_dir, round_id, j_total, outlet_nse, mean_sub_nse, decision):
+    lines = [
+        f"# Round {round_id} Leader Decision\n",
+        f"- J_total: {j_total:.5f}",
+        f"- Outlet NSE: {outlet_nse:.4f}",
+        f"- Mean Sub-basin NSE: {mean_sub_nse:.4f}",
+        f"- Trend: {decision.get('global_score_trend', 'N/A')}",
+        f"- Decision: {decision.get('stop_or_continue', 'continue')}",
+        f"\n## Assessment\n{decision.get('overall_assessment', 'N/A')}",
+        f"\n## Strategy\n{decision.get('next_round_strategy', 'N/A')}",
+    ]
+    with (round_dir / "leader_decision.md").open("w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# 12. check_phase_transition
+# ---------------------------------------------------------------------------
+
+def check_phase_transition_node(state: CalibrationState) -> Dict[str, Any]:
+    """Check if current phase should transition to next.
+
+    On VIC_ONLY → ROUTING_ONLY transition, cache each basin's VIC fluxes
+    so subsequent routing-only rounds can skip the VIC simulation.
+    On ROUTING_ONLY → JOINT transition, clear the cache so JOINT rounds
+    re-run VIC with the joint-tunable params.
+    """
+    pipeline = state["phase_pipeline"]
+    phase_idx = state["current_phase_idx"]
+    rounds_in_phase = state["rounds_in_current_phase"]
+
+    should_trans, next_idx, reason = check_phase_transition(
+        pipeline, phase_idx, rounds_in_phase,
+    )
+
+    if should_trans and next_idx is not None:
+        next_phase = pipeline[next_idx]
+        old_name = state["current_phase_name"]
+        new_name = next_phase["name"]
+
+        phase_history = list(state.get("phase_history", []))
+        j_hist = state.get("leader_j_history", [])
+        phase_history.append({
+            "from_phase": old_name,
+            "to_phase": new_name,
+            "at_round": state["round_id"],
+            "j_total": j_hist[-1] if j_hist else None,
+            "reason": reason,
+        })
+
+        print(f"\n  >>> PHASE TRANSITION: {old_name} -> {new_name}")
+        print(f"      ({reason})")
+
+        # Cache VIC fluxes on VIC_ONLY → ROUTING_ONLY transition.
+        # Clear cache on ROUTING_ONLY → JOINT transition (joint re-runs VIC).
+        shared = _get_shared(state)
+        vic_executor = shared["vic_executor"]
+        output_root = Path(state["output_root"])
+        if old_name == "VIC_ONLY" and new_name == "ROUTING_ONLY":
+            _cache_vic_fluxes_for_routing(
+                vic_executor, state["centers"], output_root, state,
+                state["worker_cfgs"],
+            )
+        elif old_name == "ROUTING_ONLY" and new_name == "JOINT":
+            _clear_vic_flux_cache(vic_executor)
+
+        # Reset direction history on phase change
+        direction_history = {sid: {} for sid in state.get("direction_history", {})}
+
+        return {
+            "current_phase_idx": next_idx,
+            "current_phase_name": new_name,
+            "rounds_in_current_phase": 0,
+            "phase_history": phase_history,
+            "phase_transitioned": True,
+            "direction_history": direction_history,
+        }
+
+    return {"phase_transitioned": False}
+
+
+# ---------------------------------------------------------------------------
+# 13. check_round_continuation
+# ---------------------------------------------------------------------------
+
+def check_round_continuation(state: CalibrationState) -> Dict[str, Any]:
+    """Determine if calibration should continue or stop."""
+    round_id = state["round_id"]
+    max_rounds = state["max_rounds"]
+
+    if round_id >= max_rounds:
+        return {"should_continue": False}
+
+    return {"should_continue": True}
+
+
+def should_continue(state: CalibrationState) -> str:
+    """Conditional edge for round loop."""
+    if state.get("should_continue", True):
+        return "round_start"
+    return "finalize"
+
+
+# ---------------------------------------------------------------------------
+# 14. finalize
+# ---------------------------------------------------------------------------
+
+def finalize(state: CalibrationState) -> Dict[str, Any]:
+    """Write final summary and convergence outputs."""
+    output_root = Path(state["output_root"])
+    best = state.get("leader_best_global", {})
+
+    summary = {
+        "output_root": str(output_root),
+        "mode": state.get("mode", "simulate"),
+        "rounds_executed": state.get("round_id", 0),
+        "final_phase": state.get("current_phase_name", ""),
+        "phase_history": state.get("phase_history", []),
+        "best_round": best.get("round_id", -1),
+        "best_global_score": best.get("score", float("-inf")),
+        "best_params_by_subbasin": best.get("params_by_subbasin", {}),
+        "j_history": state.get("leader_j_history", []),
+        "outlet_nse_history": state.get("leader_outlet_nse_history", []),
+        "communication_totals": state.get("comm_totals", {}),
+        "end_time_utc": _utc_now(),
+    }
+    _write_json(output_root / "final_summary.json", summary)
+
+    print(f"\nCalibration complete. Results: {output_root}")
+    print(f"Best round: {best.get('round_id', -1)}, J_total: {best.get('score', 0):.5f}")
+
+    return _to_native({"final_summary": summary})
+
+
+# ---------------------------------------------------------------------------
+# Conditional edges
+# ---------------------------------------------------------------------------
+
+
+def _cache_vic_fluxes_for_routing(
+    vic_executor, centers, output_root, state, worker_cfgs,
+):
+    """Run VIC once per basin with its best soil params, snapshot the
+    post-processed flux directory, and point the basin's VICConfig at it
+    so subsequent ROUTING_ONLY rounds skip VIC entirely.
+    """
+    import shutil
+    cache_root = output_root / "cached_vic_runoff"
+    cache_root.mkdir(parents=True, exist_ok=True)
+    print("  >>> Caching VIC fluxes for ROUTING_ONLY phase...")
+
+    for w_cfg in worker_cfgs:
+        sid = w_cfg["subbasin_id"]
+        vic_cfg = vic_executor._vic_configs.get(sid)
+        if vic_cfg is None:
+            print(f"      {sid}: no VIC config, skipping cache")
+            continue
+
+        best_params = dict(centers.get(sid, {}))
+        if not best_params:
+            print(f"      {sid}: no best params, skipping cache")
+            continue
+
+        up_routing = _build_upstream_routing_info(sid, state, worker_cfgs)
+        up_soil = _build_upstream_soil_info(sid, state, worker_cfgs)
+        ok, _ = vic_executor.run(
+            subbasin_id=sid,
+            run_id=99999,
+            candidate_id=1,
+            params=best_params,
+            phase_tag="cache_vic_flux",
+            upstream_routing_info=up_routing,
+            upstream_soil_info=up_soil,
+        )
+        if not ok:
+            print(f"      {sid}: VIC cache run failed")
+            continue
+
+        src = Path(vic_cfg.base_output_dir) / f"{sid}_calibration_ai" / "current_run" / "vic_for_routing"
+        if not src.exists():
+            print(f"      {sid}: vic_for_routing not found at {src}")
+            continue
+
+        dst = cache_root / sid
+        if dst.exists():
+            shutil.rmtree(dst)
+        shutil.copytree(str(src), str(dst))
+        vic_cfg.vic_flux_source = str(dst)
+        print(f"      {sid}: cached → {dst}")
+
+
+def _clear_vic_flux_cache(vic_executor):
+    """Reset vic_flux_source so VIC runs again during JOINT phase."""
+    for sid, vic_cfg in vic_executor._vic_configs.items():
+        vic_cfg.vic_flux_source = ""
+    print("  >>> Cleared VIC flux cache for JOINT phase")
+
+
+def needs_exploration(state: CalibrationState) -> str:
+    """Conditional edge after check_exploration."""
+    cfg = state.get("team_config", {})
+    explore_cfg = cfg.get("initial_exploration", {})
+    if explore_cfg.get("enabled", False) and state.get("round_id", 0) == 0:
+        return "run_exploration"
+    return "round_start"
