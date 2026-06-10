@@ -73,7 +73,7 @@ Each MADR run performs **170 model evaluations per sub-basin**: 50 in the Explor
 
 - Python 3.10+
 - [VIC 5.1.0](https://github.com/UW-Hydro/VIC) executable (compiled)
-- Lohmann routing model executable
+- Lohmann routing model executable — Fortran source code is bundled in [`routing/`](routing/) with build instructions and a list of local modifications
 - Forcing, soil, vegetation, and routing input files — see the Zenodo dataset (DOI: [10.5281/zenodo.20622937](https://doi.org/10.5281/zenodo.20622937))
 
 ### Install Python dependencies
@@ -209,6 +209,11 @@ SADR/                                   # Single-Agent Diagnostic Reasoning abla
 ├── schemas/leader_output.json
 ├── scripts/                            # Same modules; LLM Worker replaced by a rule-based executor
 └── docs/LangGraph_Workflow.png
+
+routing/                                # Lohmann routing model (Fortran source + README)
+├── Makefile
+├── *.f, *.c, *.h                       # Lohmann routing + UW preprocessing utilities
+└── README.md                           # Build instructions and local modifications
 
 docs/
 └── api_provider_configs.md             # Guide for switching LLM providers
