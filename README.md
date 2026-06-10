@@ -4,8 +4,10 @@ MADR is an LLM-driven framework for calibrating distributed hydrological models 
 
 This repository contains two architectures:
 
-- **`MADR/`** — Multi-Agent Diagnostic Reasoning (Leader + per-basin Worker LLMs).
-- **`SADR/`** — Single-Agent Diagnostic Reasoning ablation (one LLM produces both the global diagnosis and the per-basin parameter values directly, with no separate Worker layer).
+- **`MADR/`** — Multi-Agent Diagnostic Reasoning. Leader LLM **and** per-basin Worker LLMs.
+- **`SADR/`** — Single-Agent Diagnostic Reasoning ablation. The Leader LLM is retained, but the LLM-based Worker is replaced by a deterministic, rule-based code executor, so LLM-driven reasoning occurs only at the Leader level.
+
+📦 **Data**: companion dataset (inputs, all 46 calibration runs, two benchmark methods) is on Zenodo: [10.5281/zenodo.20622937](https://doi.org/10.5281/zenodo.20622937)
 
 ---
 
@@ -54,11 +56,11 @@ Three mechanisms organize coordination among Workers:
 
   | Phase | Rounds | Parameters | Notes |
   |---|---|---|---|
-  | **VIC_Only** | 50 | 6 soil params (binfilt, Ds, Dsmax, Ws, soil_d2, soil_d3) | Routing held at defaults |
-  | **Routing_Only** | 30 | velocity, diffusivity | VIC held at search center from VIC_Only |
-  | **Joint** | 10 | All 8 | Fine-tunes from end of Routing_Only |
+  | **VIC-Only** | 50 | 6 soil params (binfilt, Ds, Dsmax, Ws, soil_d2, soil_d3) | Routing held at defaults |
+  | **Routing-Only** | 30 | velocity, diffusivity | VIC held at search center from VIC-Only |
+  | **Joint** | 10 | All 8 | Fine-tunes from end of Routing-Only |
 
-- **Multi-candidate generation** (early rounds of VIC_Only and Routing_Only — first 11 and first 5 respectively): every Worker is invoked three times with distinct strategy tags (`conservative`, `moderate`, `bold`); the three candidate parameter sets are simulated and the one achieving the highest NSE is adopted as that round's proposal.
+- **Multi-candidate generation** (early rounds of VIC-Only and Routing-Only — first 11 and first 5 respectively): every Worker is invoked three times with distinct strategy tags (`conservative`, `moderate`, `bold`); the three candidate parameter sets are simulated and the one achieving the highest NSE is adopted as that round's proposal.
 - **Round 1 special case**: the Worker LLM is not invoked. The model runs with the configured default parameters, providing the baseline against which the Leader's first guidance is issued.
 
 Each MADR run performs **170 model evaluations per sub-basin**: 50 in the Exploration Stage + 120 across 90 Agent Rounds (75 single-candidate × 1 + 15 multi-candidate × 3).
@@ -72,7 +74,7 @@ Each MADR run performs **170 model evaluations per sub-basin**: 50 in the Explor
 - Python 3.10+
 - [VIC 5.1.0](https://github.com/UW-Hydro/VIC) executable (compiled)
 - Lohmann routing model executable
-- Forcing, soil, vegetation, and routing input files (archived on Zenodo; see the Citation section)
+- Forcing, soil, vegetation, and routing input files — see the Zenodo dataset (DOI: [10.5281/zenodo.20622937](https://doi.org/10.5281/zenodo.20622937))
 
 ### Install Python dependencies
 
@@ -99,9 +101,9 @@ See [docs/api_provider_configs.md](docs/api_provider_configs.md) for switching p
 
 ### Replace local paths in the config
 
-The shipped configs contain the **original author's absolute paths** to executables and data. You must replace them before running. Both configs include a top-level `_path_replacement_notice` field flagging this.
+The shipped configs contain the **original author's absolute paths** to executables and data. You must replace them before running. Every config includes a top-level `_path_replacement_notice` field flagging this.
 
-The fields to replace, in both `MADR/configs/bengbu_MADR_default.json` and `SADR/configs/bengbu_SADR_default.json`:
+The fields to replace, in any config under `MADR/configs/` or `SADR/configs/`:
 
 | Field | Description |
 |---|---|
@@ -113,7 +115,7 @@ The fields to replace, in both `MADR/configs/bengbu_MADR_default.json` and `SADR
 | Each `workers[].rout_template_dir` | Lohmann routing template directory for that sub-basin |
 | Each `workers[].rout_exe` | Path to your routing executable |
 
-Tip: most of the data paths share the root `/Users/yc/cowork/framework/`. Search-and-replace this root with your local data root in **both** config files to keep MADR and SADR in sync.
+Tip: most of the data paths share the root `/Users/yc/cowork/framework/`. Search-and-replace this root with your local data root across all configs to keep them in sync.
 
 ### Run MADR
 
@@ -124,12 +126,27 @@ python -m scripts.run_langgraph \
     --output-root ./output
 ```
 
-### Run SADR (single-agent ablation)
+### Run SADR (Single-Agent Diagnostic Reasoning ablation)
 
 ```bash
 cd SADR
 python -m scripts.run_langgraph \
     --team-config configs/bengbu_SADR_default.json \
+    --output-root ./output
+```
+
+### Run MADR ablations
+
+```bash
+cd MADR
+# MADR Without Exploration: skip the 50-evaluation Exploration Stage
+python -m scripts.run_langgraph \
+    --team-config configs/bengbu_MADR_woexp.json \
+    --output-root ./output
+
+# MADR Blank: no phase decomposition, no multi-candidate
+python -m scripts.run_langgraph \
+    --team-config configs/bengbu_MADR_blank.json \
     --output-root ./output
 ```
 
@@ -153,7 +170,10 @@ python -m scripts.run_langgraph \
 
 ```
 MADR/                                   # Multi-Agent Diagnostic Reasoning
-├── configs/bengbu_MADR_default.json    # Run configuration (replace paths before use)
+├── configs/
+│   ├── bengbu_MADR_default.json        # Standard MADR (170 evals / sub-basin)
+│   ├── bengbu_MADR_woexp.json          # Ablation: no Exploration Stage (120 evals / sub-basin)
+│   └── bengbu_MADR_blank.json          # Ablation: no phase decomposition, no multi-candidate (170 evals)
 ├── prompts/                            # LLM system prompts
 │   ├── leader_system.md
 │   ├── leader_review.md
@@ -187,7 +207,7 @@ SADR/                                   # Single-Agent Diagnostic Reasoning abla
 ├── configs/bengbu_SADR_default.json
 ├── prompts/                            # Leader-only prompts (no worker prompts)
 ├── schemas/leader_output.json
-├── scripts/                            # Same modules; Worker layer disabled
+├── scripts/                            # Same modules; LLM Worker replaced by a rule-based executor
 └── docs/LangGraph_Workflow.png
 
 docs/
@@ -196,11 +216,31 @@ docs/
 
 ---
 
-## SADR (Single-Agent Diagnostic Reasoning)
+## SADR (Single-Agent Diagnostic Reasoning ablation)
 
-SADR is the single-agent ablation used in the paper. A single LLM produces both the global diagnosis and the per-sub-basin parameter values directly, without a separate Worker layer. SADR runs under the same computational budget as MADR (170 evaluations per sub-basin) to isolate the contribution of MADR's multi-agent architecture.
+SADR retains MADR's Leader-Worker structure but replaces the LLM-based Worker with a **deterministic rule-based executor**, so LLM-driven diagnostic reasoning occurs only at the Leader level. It runs under the same per-sub-basin budget as MADR (170 evaluations) to isolate the contribution of the LLM Worker.
 
-SADR's config (`SADR/configs/bengbu_SADR_default.json`) omits `model`, `provider`, and `api_key_env` from worker entries because workers do not invoke an LLM — the Leader handles all reasoning. Apart from this, the project structure, run commands, and CLI options are identical to MADR.
+The rule-based Worker:
+
+- Maps the Leader's (direction, magnitude) hint into a step around the historical best, with **small / medium / large = 10% / 22% / 40%** of the parameter's feasible range.
+- Applies a **step-decay schedule** that shrinks the effective step size as a phase advances, with phase-specific constants (1.00, 0.05) for VIC-only, (0.40, 0.30) for Routing-only, and (0.15, 0.10) for Joint.
+- Includes an **escape protocol**: when a sub-basin's NSE fails to improve beyond the historical best by more than 0.001 for 10 consecutive rounds, the Worker switches to random uniform perturbation under a three-tier escalation schedule (10% → 15% → 20%+ of the feasible range).
+- Uses the same multi-candidate mechanism as MADR, with three candidates per round generated by scale factors 0.3 / 0.7 / 1.0 (conservative / moderate / normal).
+
+SADR's config (`SADR/configs/bengbu_SADR_default.json`) omits `model`, `provider`, and `api_key_env` from worker entries because workers do not invoke an LLM. All other run commands and CLI options are identical to MADR.
+
+---
+
+## MADR Ablation Configurations
+
+Two additional MADR ablation variants are provided as separate config files under `MADR/configs/`. Both share the same source code as the standard MADR and differ only in the run configuration.
+
+| Config | What is removed | Per-sub-basin budget |
+|---|---|---|
+| `bengbu_MADR_woexp.json` | The 50-evaluation Exploration Stage | 120 evaluations (90 Agent Rounds only) |
+| `bengbu_MADR_blank.json` | Phase decomposition **and** multi-candidate mechanism | 170 evaluations (50 Exploration + 120 single-candidate Agent Rounds, all 8 parameters tuned simultaneously each round) |
+
+These match the two internal-mechanism ablations reported in the paper.
 
 ---
 
@@ -214,6 +254,10 @@ The default config uses Claude (`claude-sonnet-4-6`). All tested providers (Gemi
 
 If you use this code, please cite:
 
-> Zhao, Y., Li, Z., Zhu, L., Jin, J., & Zhang, J. (2026). LLM-Driven Diagnostic Reasoning for Distributed Hydrological Model Calibration. *(manuscript)*
+> Zhao, Y., Li, Z., Zhu, L., Jin, J., & Zhang, J. (2026). LLM-Driven Diagnostic Reasoning for Distributed Hydrological Model Calibration. *(manuscript under review)*
 
-The dataset used in the paper (observed streamflow, VIC and Lohmann input files for 1980–1996) is archived on Zenodo.
+### Dataset
+
+The companion dataset (observation streamflow, VIC and Lohmann input files for 1980–1996, plus all calibration outputs for MADR / SADR / ablations / SCE-UA / NSGA-III) is available on Zenodo:
+
+> Zhao, Y. (2026). Dataset for "LLM-Driven Diagnostic Reasoning for Distributed Hydrological Model Calibration". Zenodo. https://doi.org/10.5281/zenodo.20622937

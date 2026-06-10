@@ -1,0 +1,222 @@
+{
+  "_comment": "MADR ablation: NO Exploration Stage. 3-phase pipeline (50 VIC + 30 routing + 10 joint = 90 rounds). 120 evaluations per sub-basin.",
+  "_path_replacement_notice": "All absolute paths below (vic_exe, rout_exe, and each worker's obs_file/soil_base/global_base/rout_template_dir) are set to the ORIGINAL author's local paths. REPLACE them with your own local paths before running. See README.md for guidance.",
+  "run_name": "MADR_claude_90r",
+  "max_rounds": 0,
+  "candidates_per_worker": 1,
+  "max_parallel_workers": 3,
+  "simulation_period": {
+    "start_year": 1980,
+    "end_year": 1990
+  },
+  "model_binding": {
+    "mode": "real"
+  },
+  "outlet_subbasin_id": "bengbu",
+  "vic_exe": "/Users/yc/cowork/framework/model/VIC-5.1.0/vic/drivers/classic/vic_classic.exe",
+  "rout_exe": "/Users/yc/cowork/framework/model/route_1.0/src/rout",
+  "objective_weights": {
+    "mean_nse": 0.9,
+    "consistency": 0.1
+  },
+  "stop_rules": {
+    "outlet_nse_target": 0.85,
+    "min_improvement": 0.003,
+    "patience_rounds": 5
+  },
+  "phase_config": {
+    "pipeline": [
+      {
+        "name": "VIC_ONLY",
+        "max_rounds": 50,
+        "mc_rounds": 11,
+        "mc_candidates": 3
+      },
+      {
+        "name": "ROUTING_ONLY",
+        "max_rounds": 30,
+        "mc_rounds": 5,
+        "mc_candidates": 3
+      },
+      {
+        "name": "JOINT",
+        "max_rounds": 10,
+        "mc_rounds": 0,
+        "mc_candidates": 0
+      }
+    ]
+  },
+  "param_ranges": {
+    "binfilt": [
+      0.001,
+      0.4
+    ],
+    "Ds": [
+      0.0001,
+      1.0
+    ],
+    "Dsmax": [
+      1.0,
+      30.0
+    ],
+    "Ws": [
+      0.5,
+      1.0
+    ],
+    "soil_d2": [
+      0.1,
+      2.0
+    ],
+    "soil_d3": [
+      0.1,
+      2.0
+    ],
+    "velocity": [
+      0.5,
+      3.0
+    ],
+    "diffusivity": [
+      200.0,
+      4000.0
+    ]
+  },
+  "initial_param_center": {
+    "binfilt": 0.2,
+    "Ds": 0.01,
+    "Dsmax": 10.0,
+    "Ws": 0.7,
+    "soil_d2": 0.3,
+    "soil_d3": 1.5,
+    "velocity": 1.5,
+    "diffusivity": 800
+  },
+  "initial_radius": {
+    "binfilt": 0.05,
+    "Ds": 0.05,
+    "Dsmax": 5.0,
+    "Ws": 0.1,
+    "soil_d2": 0.2,
+    "soil_d3": 0.3,
+    "velocity": 0.3,
+    "diffusivity": 500
+  },
+  "leader": {
+    "agent_id": "leader_bengbu",
+    "model": "claude-sonnet-4-6",
+    "provider": "anthropic",
+    "temperature": 0.3,
+    "max_tokens": 8192,
+    "api_key_env": "ANTHROPIC_API_KEY",
+    "timeout_sec": 240.0
+  },
+  "workers": [
+    {
+      "agent_id": "worker_xixian",
+      "subbasin_id": "xixian",
+      "station_code": "XX",
+      "model": "claude-sonnet-4-6",
+      "provider": "anthropic",
+      "temperature": 0.4,
+      "max_tokens": 8192,
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "timeout_sec": 60.0,
+      "memory_window": 5,
+      "obs_file": "/Users/yc/cowork/framework/data/obs/XX/51012-2-xixian.txt",
+      "neighbors_downstream": [
+        "wangjiaba"
+      ],
+      "is_outlet": false,
+      "soil_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/xixian_1980-1990_025deg/vic_temp/soil/SOIL_PARAM_COMPLETE.txt",
+      "global_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/xixian_1980-1990_025deg/vic_temp/global_param_xixian_1980-1990_025deg.txt",
+      "rout_template_dir": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/xixian_1980-1990_025deg/routing_param",
+      "rout_exe": "/Users/yc/cowork/framework/model/route_1.0/src/rout"
+    },
+    {
+      "agent_id": "worker_wangjiaba",
+      "subbasin_id": "wangjiaba",
+      "station_code": "WJB",
+      "model": "claude-sonnet-4-6",
+      "provider": "anthropic",
+      "temperature": 0.4,
+      "max_tokens": 8192,
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "timeout_sec": 60.0,
+      "memory_window": 5,
+      "obs_file": "/Users/yc/cowork/framework/data/obs/WJB/HUAIH-51030-wangjiaba.txt",
+      "neighbors_downstream": [
+        "bengbu"
+      ],
+      "is_outlet": false,
+      "soil_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/wangjiaba_1980-1990_025deg/vic_temp/soil/SOIL_PARAM_COMPLETE.txt",
+      "global_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/wangjiaba_1980-1990_025deg/vic_temp/global_param_wangjiaba_1980-1990_025deg.txt",
+      "rout_template_dir": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/wangjiaba_1980-1990_025deg/routing_param",
+      "rout_exe": "/Users/yc/cowork/framework/model/route_1.0/src/rout"
+    },
+    {
+      "agent_id": "worker_jiangjiaji",
+      "subbasin_id": "jiangjiaji",
+      "station_code": "JJJ",
+      "model": "claude-sonnet-4-6",
+      "provider": "anthropic",
+      "temperature": 0.4,
+      "max_tokens": 8192,
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "timeout_sec": 60.0,
+      "memory_window": 5,
+      "obs_file": "/Users/yc/cowork/framework/data/obs/JJJ/HUAIH-51590-jiangjiaji.txt",
+      "neighbors_downstream": [
+        "bengbu"
+      ],
+      "is_outlet": false,
+      "soil_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/jiangjiaji_1980-1990_025deg/vic_temp/soil/SOIL_PARAM_COMPLETE.txt",
+      "global_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/jiangjiaji_1980-1990_025deg/vic_temp/global_param_jiangjiaji_1980-1990_025deg.txt",
+      "rout_template_dir": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/jiangjiaji_1980-1990_025deg/routing_param",
+      "rout_exe": "/Users/yc/cowork/framework/model/route_1.0/src/rout"
+    },
+    {
+      "agent_id": "worker_zhoukou",
+      "subbasin_id": "zhoukou",
+      "station_code": "ZK",
+      "model": "claude-sonnet-4-6",
+      "provider": "anthropic",
+      "temperature": 0.4,
+      "max_tokens": 8192,
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "timeout_sec": 60.0,
+      "memory_window": 5,
+      "obs_file": "/Users/yc/cowork/framework/data/obs/ZK/HUAIH-51760-zhoukou.txt",
+      "neighbors_downstream": [
+        "bengbu"
+      ],
+      "is_outlet": false,
+      "soil_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/zhoukou_1980-1990_025deg/vic_temp/soil/SOIL_PARAM_COMPLETE.txt",
+      "global_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/zhoukou_1980-1990_025deg/vic_temp/global_param_zhoukou_1980-1990_025deg.txt",
+      "rout_template_dir": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/zhoukou_1980-1990_025deg/routing_param",
+      "rout_exe": "/Users/yc/cowork/framework/model/route_1.0/src/rout"
+    },
+    {
+      "agent_id": "worker_bengbu",
+      "subbasin_id": "bengbu",
+      "station_code": "BB",
+      "model": "claude-sonnet-4-6",
+      "provider": "anthropic",
+      "temperature": 0.4,
+      "max_tokens": 8192,
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "timeout_sec": 60.0,
+      "memory_window": 5,
+      "obs_file": "/Users/yc/cowork/framework/data/obs/BB/51080_bengbu.txt",
+      "neighbors_downstream": [],
+      "is_outlet": true,
+      "soil_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/bengbu_1980-1990_025deg/vic_temp/soil/SOIL_PARAM_COMPLETE.txt",
+      "global_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/bengbu_1980-1990_025deg/vic_temp/global_param_bengbu_1980-1990_025deg.txt",
+      "rout_template_dir": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/bengbu_1980-1990_025deg/routing_param",
+      "rout_exe": "/Users/yc/cowork/framework/model/route_1.0/src/rout"
+    }
+  ],
+  "initial_exploration": {
+    "enabled": false,
+    "n_near": 0,
+    "n_random": 0
+  }
+}
