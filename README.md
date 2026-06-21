@@ -51,24 +51,28 @@ Three mechanisms organize coordination among Workers:
 
 ### Calibration strategy
 
-- **Exploration Stage** (before Agent Rounds): 50 simulations per sub-basin (10 Gaussian perturbations around the configured default + 40 Latin Hypercube samples) over the six VIC soil parameters; routing parameters held at defaults. The per-sub-basin summary (best NSE, top-five NSE, best parameter combination) is injected into every Worker's prompt as a fixed contextual reference and shown to the Leader once at Round 1. The exploration provides **soft contextual evidence** to the LLMs; it does **not** modify the initial parameter center or the search radius.
-- **Three-phase Agent Rounds** (90 rounds total):
+MADR runs an **Exploration Stage** followed by **three sequential agent phases**. Each phase ends as soon as either of two conditions fires:
 
-  | Phase | Rounds | Parameters | Notes |
-  |---|---|---|---|
-  | **VIC-Only** | 50 | 6 soil params (binfilt, Ds, Dsmax, Ws, soil_d2, soil_d3) | Routing held at defaults |
-  | **Routing-Only** | 30 | velocity, diffusivity | VIC held at search center from VIC-Only |
-  | **Joint** | 10 | All 8 | Fine-tunes from end of Routing-Only |
+1. **Patience-based early termination** (the recommended trigger) — the in-phase mean sub-basin NSE has not improved for `patience_rounds` consecutive **single-candidate** rounds. Multi-candidate rounds are excluded from the counter so aggressive exploration does not trip the trigger.
+2. **`max_rounds` cap** — a hard upper bound that always applies, providing a safety ceiling on per-phase cost.
+
+This adaptive behavior is the headline change in the current version: each phase now stops as soon as it plateaus, instead of always running to its full round budget. The paper's reported runs can still be reproduced exactly — see the *Reproducing the paper's fixed-budget runs* note below.
+
+- **Exploration Stage** (before Agent Rounds): 50 simulations per sub-basin (10 Gaussian perturbations around the configured default + 40 Latin Hypercube samples) over the six VIC soil parameters; routing parameters held at defaults. The per-sub-basin summary (best NSE, top-five NSE, best parameter combination) is injected into every Worker's prompt as a fixed contextual reference and shown to the Leader once at Round 1. The exploration provides **soft contextual evidence** to the LLMs; it does **not** modify the initial parameter center or the search radius.
+
+- **Three sequential Agent Phases** with both a per-phase cap and a recommended patience trigger:
+
+  | Phase | `max_rounds` (cap) | `patience_rounds` (recommended) | Parameters | Notes |
+  |---|---|---|---|---|
+  | **VIC-Only** | 50 | 10 | 6 soil params (binfilt, Ds, Dsmax, Ws, soil_d2, soil_d3) | Routing held at defaults |
+  | **Routing-Only** | 30 | 5 | velocity, diffusivity | VIC held at search center from VIC-Only |
+  | **Joint** | 10 | 3 | All 8 | Fine-tunes from end of Routing-Only |
 
 - **Multi-candidate generation** (early rounds of VIC-Only and Routing-Only — first 11 and first 5 respectively): every Worker is invoked three times with distinct strategy tags (`conservative`, `moderate`, `bold`); the three candidate parameter sets are simulated and the one achieving the highest NSE is adopted as that round's proposal.
 - **Round 1 special case**: the Worker LLM is not invoked. The model runs with the configured default parameters, providing the baseline against which the Leader's first guidance is issued.
-- **Final round (force-best)**: once the last phase ends, MADR runs one mandatory final round in which each Worker uses its own per-sub-basin best historical parameters. This delivers a clean end-state composite for downstream use.
+- **Final round (force-best)**: once the last phase ends — whether by patience or by hitting its `max_rounds` cap — MADR runs one mandatory final round in which each Worker uses its own per-sub-basin best historical parameters. This delivers a clean end-state composite for downstream use.
 
-Each MADR run performs **170 model evaluations per sub-basin**: 50 in the Exploration Stage + 120 across 90 Agent Rounds (75 single-candidate × 1 + 15 multi-candidate × 3).
-
-### Optional: early termination via per-phase patience
-
-By default each phase runs its full round budget. Setting `patience_rounds` on a pipeline entry enables a no-improvement check: once the in-phase mean sub-basin NSE has not improved for `patience_rounds` consecutive **single-candidate** rounds, the phase ends early and the next phase begins. Multi-candidate rounds are excluded from the counter so aggressive exploration does not trip the trigger.
+Recommended pipeline (patience enabled):
 
 ```jsonc
 "phase_config": {
@@ -80,7 +84,11 @@ By default each phase runs its full round budget. Setting `patience_rounds` on a
 }
 ```
 
-Omitting `patience_rounds` (or setting it to `999`) disables the check for that phase, reproducing the fixed-budget behavior used in the paper. The `max_rounds` cap always applies regardless of patience. After the last phase ends — whether by patience or by hitting its cap — the mandatory final force-best round still runs.
+**Evaluation budget per sub-basin.** With patience enabled, each MADR run typically converges in **roughly 110–150 model evaluations per sub-basin**, depending on how quickly each phase plateaus. With patience disabled, the budget is the fixed **170 evaluations** used in the paper.
+
+#### Reproducing the paper's fixed-budget runs
+
+The paper's reported numbers use the legacy fixed-budget configuration: each phase runs to its full `max_rounds` regardless of plateau, giving exactly **170 evaluations per sub-basin** (50 Exploration + 120 across 90 Agent Rounds = 75 single-candidate × 1 + 15 multi-candidate × 3). To reproduce, omit `patience_rounds` from every phase (or set it to `999` to disable the trigger). The shipped `bengbu_MADR_default.json` config reflects this fixed-budget setting so that paper-reported runs are reproducible out of the box.
 
 ---
 
