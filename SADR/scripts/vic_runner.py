@@ -84,6 +84,10 @@ def reset_dir(path: str) -> None:
 # ── observation / simulation I/O ─────────────────────────────────────────
 
 def read_obs(obs_path: str, start: dt.date, end: dt.date) -> Dict[dt.date, float]:
+    """Read observed discharge. Accepts both daily (`YYYY-M-D`) and monthly (`YYYY-M`)
+    date strings. Monthly observations are keyed by `date(Y, M, 1)` so downstream
+    code can detect monthly mode by checking whether all `.day` values equal 1.
+    """
     obs: Dict[dt.date, float] = {}
     with open(obs_path, "r", encoding="utf-8", errors="ignore") as f:
         reader = csv.DictReader(f, delimiter="\t")
@@ -92,7 +96,13 @@ def read_obs(obs_path: str, start: dt.date, end: dt.date) -> Dict[dt.date, float
                 date_str = row.get("dates") or row.get("date")
                 if not date_str:
                     continue
-                y, m, d = (int(x) for x in date_str.split("-"))
+                parts = date_str.split("-")
+                if len(parts) == 3:
+                    y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
+                elif len(parts) == 2:
+                    y, m, d = int(parts[0]), int(parts[1]), 1
+                else:
+                    continue
                 date = dt.date(y, m, d)
                 if date < start or date > end:
                     continue
@@ -103,6 +113,24 @@ def read_obs(obs_path: str, start: dt.date, end: dt.date) -> Dict[dt.date, float
             except Exception:
                 continue
     return obs
+
+
+def aggregate_sim_to_monthly(sim_daily: Dict[dt.date, float]) -> Dict[dt.date, float]:
+    """Aggregate a daily-Q dict to monthly means keyed by `date(Y, M, 1)`."""
+    bucket: Dict[dt.date, List[float]] = {}
+    for d, v in sim_daily.items():
+        if math.isnan(v) or math.isinf(v):
+            continue
+        key = dt.date(d.year, d.month, 1)
+        bucket.setdefault(key, []).append(v)
+    return {k: (sum(vs) / len(vs)) for k, vs in bucket.items() if vs}
+
+
+def is_monthly_obs(obs: Dict[dt.date, float]) -> bool:
+    """True iff every observation date falls on day=1 (interpreted as monthly)."""
+    if not obs:
+        return False
+    return all(d.day == 1 for d in obs.keys())
 
 
 def read_sim_day(sim_path: str, start: dt.date, end: dt.date) -> Dict[dt.date, float]:
@@ -769,6 +797,8 @@ def run_once(cfg: RuntimeConfig, run_id: int, params: Dict[str, float],
     end_date = dt.date(cfg.end_year, 12, 31)
     obs = read_obs(cfg.obs_file, start_date, end_date)
     sim = read_sim_day(day_file, start_date, end_date)
+    if is_monthly_obs(obs):
+        sim = aggregate_sim_to_monthly(sim)
     nse, rmse, pbias, kge, peak_ratio, low_ratio = compute_metrics(obs, sim)
 
     metrics = {

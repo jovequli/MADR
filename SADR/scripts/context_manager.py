@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Token budget manager for Leader LLM context.
 
-Solves TRAv2's token explosion by enforcing a hard budget on the
+Solves SADR's token explosion by enforcing a hard budget on the
 Leader prompt. Sections are prioritized: low-priority sections get
 compressed or dropped first when the budget is exceeded.
 

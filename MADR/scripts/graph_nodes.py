@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LangGraph node functions for TRAv2 calibration.
+"""LangGraph node functions for MADR calibration.
 
 Each function takes CalibrationState and returns a partial state update dict.
 All domain logic is delegated to existing modules; these nodes are pure
@@ -131,7 +131,6 @@ def _get_shared(state: CalibrationState) -> Dict[str, Any]:
         llm_client=leader_llm,
         workers=worker_cfgs,
         objective_weights=state.get("objective_weights", {}),
-        stop_rules=state.get("stop_rules", {}),
         param_ranges=range_lists,
     )
 
@@ -498,11 +497,8 @@ def init_calibration(state: CalibrationState) -> Dict[str, Any]:
     phase_pipeline = load_phase_pipeline(cfg)
     max_rounds = state.get("max_rounds", 0) or get_total_max_rounds(phase_pipeline)
 
-    # Objective weights and stop rules
+    # Objective weights
     objective_weights = cfg.get("objective_weights", {"mean_nse": 0.90, "consistency": 0.10})
-    stop_rules = cfg.get("stop_rules", {
-        "outlet_nse_target": 0.85, "min_improvement": 0.003, "patience_rounds": 3,
-    })
 
     # MC config
     mc_cfg = cfg.get("multi_candidate", {})
@@ -528,7 +524,6 @@ def init_calibration(state: CalibrationState) -> Dict[str, Any]:
         "mode": state.get("mode", "simulate"),
         "max_rounds": max_rounds,
         "objective_weights": objective_weights,
-        "stop_rules": stop_rules,
         "initial_phase": phase_pipeline[0]["name"] if phase_pipeline else "VIC_ONLY",
         "phase_pipeline": phase_pipeline,
         "initial_centers": centers,
@@ -553,7 +548,6 @@ def init_calibration(state: CalibrationState) -> Dict[str, Any]:
         "topo_levels": topo_levels,
         "param_ranges": param_ranges,
         "objective_weights": objective_weights,
-        "stop_rules": stop_rules,
         "phase_pipeline": phase_pipeline,
         "phase_nse_thresholds": phase_nse_thresholds,
         "max_rounds": max_rounds,
@@ -583,6 +577,9 @@ def init_calibration(state: CalibrationState) -> Dict[str, Any]:
         "exploration_results": {},
         "exploration_summary": "",
         "should_continue": True,
+        "force_final_round": False,
+        "best_msn_in_phase": float("-inf"),
+        "rounds_since_improvement_in_phase": 0,
     }
 
 
@@ -596,13 +593,102 @@ def check_exploration(state: CalibrationState) -> Dict[str, Any]:
 
 
 def run_exploration(state: CalibrationState) -> Dict[str, Any]:
-    """Run initial exploration (pure code, zero LLM calls)."""
-    from .initial_explorer import run_initial_exploration, format_exploration_summary
+    """Run initial exploration (pure code, zero LLM calls).
 
-    shared = _get_shared(state)
+    If `initial_exploration.seed_from_run` is set in config, reuses a
+    previous run's per-basin exploration JSONs and only rebuilds the
+    summary string — no new VIC simulations are launched.
+    """
+    from .initial_explorer import (
+        run_initial_exploration,
+        format_exploration_summary,
+        _compact_params,
+    )
+
     cfg = state["team_config"]
     explore_cfg = cfg.get("initial_exploration", {})
     output_root = Path(state["output_root"])
+
+    # ── Path A: reuse a previous run's exploration ──
+    seed_run = explore_cfg.get("seed_from_run", "")
+    if seed_run:
+        seed_dir = Path(seed_run)
+        seed_exp_dir = seed_dir / "exploration"
+        if not seed_exp_dir.exists():
+            raise RuntimeError(
+                f"seed_from_run path missing exploration/ folder: {seed_run}"
+            )
+
+        SOIL_KEYS = ["binfilt", "Ds", "Dsmax", "Ws", "soil_d2", "soil_d3"]
+        results: Dict[str, Dict[str, Any]] = {}
+        for sid_file in sorted(seed_exp_dir.glob("*.json")):
+            sid = sid_file.stem
+            if sid.startswith("_"):
+                continue  # skip our own metadata files
+            data = json.load(open(sid_file))
+            samples = data.get("samples", []) or []
+            if samples:
+                sorted_samples = sorted(samples, key=lambda s: s.get("nse", -999), reverse=True)
+                best = sorted_samples[0]
+            else:
+                best = {
+                    "nse": data.get("best_nse", 0),
+                    "params": data.get("best_params", {}),
+                    "label": "seed",
+                }
+            top5 = sorted(samples, key=lambda s: s.get("nse", -999), reverse=True)[:5]
+            top5_nse = [s.get("nse", -999) for s in top5]
+            top5_str = ", ".join(f"{n:.3f}" for n in top5_nse)
+            summary_text = (
+                f"{sid}: best_NSE={best.get('nse', data.get('best_nse', 0)):.4f} "
+                f"({best.get('label', 'seed')}) | top5=[{top5_str}] | "
+                f"params={_compact_params(best.get('params', data.get('best_params', {})), SOIL_KEYS)}"
+            )
+            results[sid] = {
+                "best_params": data.get("best_params", best.get("params", {})),
+                "best_nse": data.get("best_nse", best.get("nse", 0)),
+                "best_metrics": best.get("metrics", {}),
+                "all_results": samples,
+                "n_samples": data.get("n_samples", len(samples)),
+                "summary_text": summary_text,
+            }
+
+        summary = format_exploration_summary(results)
+
+        # Persist a copy in the new run so downstream tooling still sees expected files
+        explore_out = {
+            sid: {"best_nse": r["best_nse"], "best_params": r["best_params"],
+                  "n_samples": r["n_samples"], "summary": r["summary_text"]}
+            for sid, r in results.items()
+        }
+        _write_json(output_root / "initial_exploration.json", explore_out)
+        new_explore_dir = output_root / "exploration"
+        _ensure_dir(new_explore_dir)
+        _write_json(new_explore_dir / "_seed_info.json", {
+            "seed_from_run": str(seed_dir),
+            "basins": list(results.keys()),
+        })
+        for sid, r in results.items():
+            _write_json(new_explore_dir / f"{sid}.json", {
+                "subbasin_id": sid,
+                "n_samples": r["n_samples"],
+                "best_nse": r["best_nse"],
+                "best_params": r["best_params"],
+                "samples": r["all_results"],
+                "_seeded_from": str(seed_dir),
+            })
+
+        print(f"  >>> Exploration reused from seed: {seed_dir.name}")
+        for sid, r in results.items():
+            print(f"      [{sid}] best_NSE={r['best_nse']:.4f}, {r['n_samples']} seed samples")
+        return _to_native({
+            "exploration_results": explore_out,
+            "exploration_summary": summary,
+            "centers": state["centers"],
+        })
+
+    # ── Path B: run new 50-sample exploration (existing logic) ──
+    shared = _get_shared(state)
 
     # The explorer needs an orchestrator-like interface
     # We create a lightweight adapter
@@ -670,10 +756,17 @@ def run_exploration(state: CalibrationState) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def round_start(state: CalibrationState) -> Dict[str, Any]:
-    """Begin a new calibration round."""
+    """Begin a new calibration round.
+
+    A round is the FINAL force-best round if either:
+      - `force_final_round` flag was set by check_phase_transition_node
+        (last phase ended via patience or max_rounds), OR
+      - the global max_rounds safety cap is reached.
+    """
     round_id = state.get("round_id", 0) + 1
     max_rounds = state["max_rounds"]
-    is_final = (round_id >= max_rounds)
+    force_final = state.get("force_final_round", False)
+    is_final = force_final or (round_id >= max_rounds)
     phase_name = state["current_phase_name"]
 
     print(f"\n{'='*60}")
@@ -698,6 +791,7 @@ def round_start(state: CalibrationState) -> Dict[str, Any]:
         "round_worker_results": [],
         "batch_worker_results": [],
         "mc_round_summaries": dict(state.get("mc_round_summaries", {})),
+        "force_final_round": False,  # consume the trigger flag
     }
 
 
@@ -778,7 +872,7 @@ def execute_batch_workers(state: CalibrationState) -> Dict[str, Any]:
         if wmem_data:
             worker.memory = WorkerMemory.from_checkpoint(wmem_data)
 
-        # Inject per-basin exploration summary for Worker prompt (matches original TRA)
+        # Inject per-basin exploration summary for Worker prompt (matches original MADR)
         full_explore = state.get("exploration_summary", "")
         if full_explore:
             basin_lines = [ln for ln in full_explore.split("\n") if sid in ln]
@@ -884,15 +978,18 @@ def _run_worker_single(
     locked_keys = set(get_locked_keys(phase))
     phase_str = phase.value
     worker_tokens = {"prompt": 0, "completion": 0, "total": 0}
+    reasoning = ""              # populated only when the LLM is called
+    leader_context = ""         # populated only when guidance is present
 
     if force_best:
         best_record = worker.ledger.get_best_params()
         if best_record and best_record.get("params"):
             candidate_list = [dict(best_record["params"])]
+            reasoning = "force_best: reused historical best params per basin"
         else:
             candidate_list = [dict(center)]
+            reasoning = "force_best: no ledger history, used current center"
     elif guidance and guidance.get("param_adjustments"):
-        leader_context = ""
         if guidance:
             priority = guidance.get("priority_focus", "")
             adj_hints = guidance.get("param_adjustments", [])
@@ -916,6 +1013,7 @@ def _run_worker_single(
     else:
         # Round 1 (no guidance): use exact default params with zero noise
         candidate_list = [dict(center)]
+        reasoning = "R1 baseline: default params (no LLM call this round)"
 
     for cand in candidate_list:
         for k in locked_keys:
@@ -948,6 +1046,8 @@ def _run_worker_single(
     _write_json(round_dir / "results" / f"worker_{sid}.json", {
         "round_id": round_id, "subbasin_id": sid,
         "result": {"params": params, "metrics": metrics, "ok": ok, "score_local": round(score, 6)},
+        "reasoning": reasoning,
+        "leader_context_received": leader_context,
         "llm_tokens": worker_tokens,
         "duration_sec": round(duration, 3),
     })
@@ -970,7 +1070,7 @@ def _run_worker_multi(
     worker, vic_executor, round_id, center, radius, guidance,
     round_dir, n_candidates, phase, up_routing, up_soil,
 ) -> Tuple[Dict, str]:
-    """Run multi-candidate worker round (TRAv2: LLM-based).
+    """Run multi-candidate worker round (MADR: LLM-based).
 
     1. Call Worker LLM n_candidates times (conservative / moderate / bold).
     2. Each call produces a full parameter set directly.
@@ -1029,7 +1129,7 @@ def _run_worker_multi(
                 total_tokens[k] += wtokens.get(k, 0)
             if cand_list:
                 cand = cand_list[0]
-                candidates.append((cand, strategy))
+                candidates.append((cand, strategy, reasoning))
                 logger.info("Worker %s MC-%s proposal: %s", sid, strategy,
                             {k: round(v, 4) for k, v in cand.items()}.__repr__()[:120])
             else:
@@ -1040,12 +1140,12 @@ def _run_worker_multi(
     # Fallback: if all LLM calls failed, use center as single candidate
     if not candidates:
         logger.warning("Worker %s all MC proposals failed, using center as fallback.", sid)
-        candidates = [(dict(center), "fallback")]
+        candidates = [(dict(center), "fallback", "all MC LLM calls failed; using current center")]
 
     # ── Step 3: Evaluate all candidates ──
     eval_results = []
     vic_cfg = vic_executor._vic_configs.get(sid)
-    for i, (params, label) in enumerate(candidates):
+    for i, (params, label, reasoning) in enumerate(candidates):
         ok, metrics = vic_executor.run(
             subbasin_id=sid,
             run_id=round_id * 100 + i + 1,
@@ -1068,6 +1168,7 @@ def _run_worker_multi(
         eval_results.append({
             "idx": i, "params": params, "metrics": metrics,
             "ok": ok, "score": score, "nse": nse, "label": label,
+            "reasoning": reasoning,
         })
         print(f"    [{sid}] MC candidate {i+1}/{len(candidates)} ({label}): NSE={nse:.4f}")
 
@@ -1078,6 +1179,22 @@ def _run_worker_multi(
     summary_line = f"{sid}: best={best['label']}, " + ", ".join(step_parts)
 
     duration = (dt.datetime.now(dt.timezone.utc) - t0).total_seconds()
+
+    # Build mc_detail with full metrics so post_round_diagnostics can derive
+    # a per-candidate DiagnosisResult for every alternative, not just the winner.
+    mc_detail = [
+        {
+            "idx": r["idx"] + 1,
+            "label": r["label"],
+            "nse": r["nse"],
+            "score": r["score"],
+            "ok": r.get("ok", True),
+            "params": r["params"],
+            "metrics": r.get("metrics", {}),
+            "reasoning": r.get("reasoning", ""),
+        }
+        for r in eval_results
+    ]
 
     result = {
         "subbasin_id": sid,
@@ -1090,6 +1207,8 @@ def _run_worker_multi(
         "analysis": f"MC({len(candidates)},LLM): best={best['label']}",
         "llm_tokens": total_tokens,
         "duration_sec": round(duration, 3),
+        "mc_detail": mc_detail,
+        "leader_context_received": leader_context,
     }
 
     _ensure_dir(round_dir / "results")
@@ -1097,8 +1216,10 @@ def _run_worker_multi(
         "round_id": round_id, "subbasin_id": sid,
         "result": {"params": best["params"], "metrics": best["metrics"],
                    "ok": best["ok"], "score_local": round(best["score"], 6)},
-        "mc_detail": [{"label": r["label"], "nse": r["nse"], "score": r["score"]}
-                      for r in eval_results],
+        "winning_strategy": best["label"],
+        "winning_reasoning": best.get("reasoning", ""),
+        "leader_context_received": leader_context,
+        "mc_detail": mc_detail,
         "llm_tokens": total_tokens,
         "duration_sec": round(duration, 3),
     })
@@ -1271,11 +1392,171 @@ def post_round_diagnostics(state: CalibrationState) -> Dict[str, Any]:
     if mc_summary:
         diag_block += "\n\n### Multi-Candidate Step-Size Response\n" + mc_summary
 
+    # Persist per-worker diagnostics so they survive the run.
+    # These reports are otherwise consumed only by the next leader prompt
+    # and discarded.
+    round_dir = Path(state["round_dir"])
+    _ensure_dir(round_dir / "results")
+    from .worker_diagnostics import diagnose_round
+    for report in diagnostic_reports:
+        sid = report.get("subbasin_id", "unknown")
+        _write_json(
+            round_dir / "results" / f"worker_{sid}_diagnostic.json",
+            report,
+        )
+        _write_worker_diagnostic_md(round_dir, round_id, report)
+
+        # For multi-candidate rounds, additionally diagnose every candidate
+        # (not just the winner) and write per-candidate files matching the
+        # routing_result/<basin>/c{i}_<label>/ naming convention. No new LLM
+        # calls — diagnose_round() is pure code, same path the winner used.
+        wr = result_by_sid.get(sid, {})
+        mc_detail = wr.get("mc_detail", []) or []
+        if len(mc_detail) > 1:
+            worker = workers.get(sid)
+            if worker is None:
+                continue
+            prev_metrics = None
+            last_entry = worker.ledger.get_last_entry() if hasattr(worker.ledger, "get_last_entry") else None
+            if last_entry:
+                prev_metrics = last_entry.get("metrics")
+            is_headwater = len(upstream_map.get(sid, [])) == 0
+            up_q = "good"
+            for up_sid in upstream_map.get(sid, []):
+                up_nse = result_by_sid.get(up_sid, {}).get("metrics", {}).get("NSE", 0)
+                if isinstance(up_nse, (int, float)) and up_nse < 0.5:
+                    up_q = "poor"
+                    break
+            ledger_summary = worker.ledger.summary()
+            for cand in mc_detail:
+                cand_metrics = cand.get("metrics") or {}
+                if not cand_metrics:
+                    continue
+                cand_diag = diagnose_round(
+                    cand_metrics, prev_metrics,
+                    {"is_headwater": is_headwater, "upstream_quality": up_q},
+                )
+                idx = cand.get("idx", 0)
+                label = cand.get("label", "cand")
+                slug = f"c{idx}_{label}"
+                cand_report = {
+                    "subbasin_id": sid,
+                    "station_code": worker.station_code,
+                    "candidate_idx": idx,
+                    "candidate_label": label,
+                    "candidate_reasoning": cand.get("reasoning", ""),
+                    "is_winner": idx == mc_detail[0]["idx"] if mc_detail else False,
+                    "diagnosis": {
+                        "primary_issue": cand_diag.primary_issue,
+                        "severity": cand_diag.severity,
+                        "severity_score": cand_diag.severity_score,
+                        "vic_responsibility": cand_diag.vic_responsibility,
+                        "routing_responsibility": cand_diag.routing_responsibility,
+                        "upstream_responsibility": cand_diag.upstream_responsibility,
+                        "reasoning": cand_diag.reasoning,
+                        "improvement_trend": cand_diag.improvement_trend,
+                        "recommendations": cand_diag.recommendations,
+                    },
+                    "current_metrics": cand_metrics,
+                    "ledger_summary": ledger_summary,
+                }
+                _write_json(
+                    round_dir / "results" / f"worker_{sid}_{slug}_diagnostic.json",
+                    cand_report,
+                )
+                _write_worker_diagnostic_md(round_dir, round_id, cand_report, slug=slug)
+
     return {
         "diagnostic_reports": diagnostic_reports,
         "diagnostics_prompt_block": diag_block,
         "coordination_result": coordination_result.to_dict() if hasattr(coordination_result, 'to_dict') else {},
     }
+
+
+def _write_worker_diagnostic_md(
+    round_dir: Path,
+    round_id: int,
+    report: Dict[str, Any],
+    slug: Optional[str] = None,
+) -> None:
+    """Render the per-round per-worker diagnostic as a human-readable Markdown.
+
+    Mirrors the leader_decision.md style. All content comes from data the
+    worker already produced this round — no extra LLM calls.
+
+    When `slug` is provided (e.g. "c2_moderate"), this is a per-candidate
+    file from a multi-candidate round; the filename and heading include the
+    candidate tag so the file fits alongside the winner's diagnostic.
+    """
+    sid = report.get("subbasin_id", "unknown")
+    diag = report.get("diagnosis", {}) or {}
+    metrics = report.get("current_metrics", {}) or {}
+    ledger = report.get("ledger_summary", {}) or {}
+    cand_label = report.get("candidate_label")
+    cand_reasoning = report.get("candidate_reasoning", "")
+    is_winner = report.get("is_winner", False)
+
+    def _f(v, fmt=".4f"):
+        if v is None:
+            return "N/A"
+        try:
+            return format(float(v), fmt)
+        except (TypeError, ValueError):
+            return str(v)
+
+    if cand_label:
+        heading = f"# Round {round_id} Worker {sid} Diagnostic [{slug or cand_label}{' — winner' if is_winner else ''}]\n"
+    else:
+        heading = f"# Round {round_id} Worker {sid} Diagnostic\n"
+
+    lines = [
+        heading,
+        "## Current Metrics",
+        f"- NSE: {_f(metrics.get('NSE'))}",
+        f"- PBIAS: {_f(metrics.get('PBIAS'), '.2f')}",
+        f"- peak_ratio: {_f(metrics.get('peak_ratio'), '.3f')}",
+        f"- lowflow_ratio: {_f(metrics.get('lowflow_ratio'), '.3f')}",
+        f"- peak_timing_bias_days: {_f(metrics.get('peak_timing_bias_days'), '.1f')}",
+        "",
+        "## Diagnosis",
+        f"- Primary issue: {diag.get('primary_issue', 'N/A')} ({diag.get('severity', 'N/A')})",
+        f"- Severity score: {_f(diag.get('severity_score'), '.2f')}",
+        f"- Improvement trend: {diag.get('improvement_trend', 'N/A')}",
+        f"- VIC responsibility: {_f(diag.get('vic_responsibility'), '.0%')}",
+        f"- Routing responsibility: {_f(diag.get('routing_responsibility'), '.0%')}",
+        f"- Upstream responsibility: {_f(diag.get('upstream_responsibility'), '.0%')}",
+        "",
+        f"### Reasoning",
+        f"{diag.get('reasoning', 'N/A')}",
+    ]
+
+    if cand_reasoning:
+        lines += ["", "### Worker proposal reasoning", cand_reasoning]
+
+    recs = diag.get("recommendations", []) or []
+    if recs:
+        lines += ["", "## Recommendations"]
+        for i, r in enumerate(recs, 1):
+            param = r.get("param", "?")
+            direction = r.get("direction", "?")
+            magnitude = r.get("magnitude", "")
+            note = r.get("note", "") or r.get("reason", "")
+            mag_str = f" ({magnitude})" if magnitude else ""
+            note_str = f" — {note}" if note else ""
+            lines.append(f"{i}. **{param}** {direction}{mag_str}{note_str}")
+
+    if ledger:
+        lines += [
+            "",
+            "## Ledger summary",
+            f"- Best NSE so far: {_f(ledger.get('best_nse'))}",
+            f"- Stagnation count: {ledger.get('stagnation_count', 0)}",
+            f"- Total entries: {ledger.get('total_entries', 0)}",
+        ]
+
+    fname = f"worker_{sid}_{slug}_diagnostic.md" if slug else f"worker_{sid}_diagnostic.md"
+    with (round_dir / "results" / fname).open("w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -1573,63 +1854,119 @@ def _write_leader_decision_md(round_dir, round_id, j_total, outlet_nse, mean_sub
 def check_phase_transition_node(state: CalibrationState) -> Dict[str, Any]:
     """Check if current phase should transition to next.
 
+    Tracks per-phase plateau detection using mean_sub_nse. If the best
+    in-phase mean_sub_nse has not improved for `patience_rounds` consecutive
+    rounds, advances the phase early.
+
     On VIC_ONLY → ROUTING_ONLY transition, cache each basin's VIC fluxes
     so subsequent routing-only rounds can skip the VIC simulation.
     On ROUTING_ONLY → JOINT transition, clear the cache so JOINT rounds
     re-run VIC with the joint-tunable params.
+    When the LAST phase ends (patience or max_rounds), schedule one
+    mandatory final force-best round via the `force_final_round` flag.
     """
     pipeline = state["phase_pipeline"]
     phase_idx = state["current_phase_idx"]
     rounds_in_phase = state["rounds_in_current_phase"]
 
+    # ── Plateau tracking ─────────────────────────────────────────────
+    msn_history = state.get("leader_mean_sub_nse_history", [])
+    latest_msn = msn_history[-1] if msn_history else float("-inf")
+    best_in_phase = state.get("best_msn_in_phase", float("-inf"))
+    rounds_since_improvement = state.get("rounds_since_improvement_in_phase", 0)
+
+    # Suppress patience increment during MC rounds (they explore aggressively
+    # and individual rounds rarely beat the cum-best — we let MC complete
+    # without forcing transition).
+    in_mc_window = False
+    cur_phase = pipeline[phase_idx] if phase_idx < len(pipeline) else None
+    if cur_phase:
+        in_mc_window = rounds_in_phase <= cur_phase.get("mc_rounds", 0)
+
+    if latest_msn > best_in_phase:
+        best_in_phase = latest_msn
+        rounds_since_improvement = 0
+    elif not in_mc_window:
+        rounds_since_improvement += 1
+
     should_trans, next_idx, reason = check_phase_transition(
-        pipeline, phase_idx, rounds_in_phase,
+        pipeline, phase_idx, rounds_in_phase, rounds_since_improvement,
     )
 
-    if should_trans and next_idx is not None:
-        next_phase = pipeline[next_idx]
-        old_name = state["current_phase_name"]
-        new_name = next_phase["name"]
+    # Skip transition logic on a final-round invocation (we shouldn't move
+    # phases after the user-mandated final force_best round runs).
+    if state.get("is_final_round", False):
+        return {
+            "phase_transitioned": False,
+            "best_msn_in_phase": best_in_phase,
+            "rounds_since_improvement_in_phase": rounds_since_improvement,
+        }
 
+    if should_trans:
+        old_name = state["current_phase_name"]
         phase_history = list(state.get("phase_history", []))
         j_hist = state.get("leader_j_history", [])
+
+        # ── Case A: advance to next phase ──
+        if next_idx is not None:
+            next_phase = pipeline[next_idx]
+            new_name = next_phase["name"]
+            phase_history.append({
+                "from_phase": old_name,
+                "to_phase": new_name,
+                "at_round": state["round_id"],
+                "j_total": j_hist[-1] if j_hist else None,
+                "reason": reason,
+            })
+            print(f"\n  >>> PHASE TRANSITION: {old_name} -> {new_name}")
+            print(f"      ({reason})")
+
+            shared = _get_shared(state)
+            vic_executor = shared["vic_executor"]
+            output_root = Path(state["output_root"])
+            if old_name == "VIC_ONLY" and new_name == "ROUTING_ONLY":
+                _cache_vic_fluxes_for_routing(
+                    vic_executor, state["centers"], output_root, state,
+                    state["worker_cfgs"],
+                )
+            elif old_name == "ROUTING_ONLY" and new_name == "JOINT":
+                _clear_vic_flux_cache(vic_executor)
+
+            direction_history = {sid: {} for sid in state.get("direction_history", {})}
+            return {
+                "current_phase_idx": next_idx,
+                "current_phase_name": new_name,
+                "rounds_in_current_phase": 0,
+                "phase_history": phase_history,
+                "phase_transitioned": True,
+                "direction_history": direction_history,
+                "best_msn_in_phase": float("-inf"),       # reset per new phase
+                "rounds_since_improvement_in_phase": 0,
+            }
+
+        # ── Case B: last phase ended → schedule final force_best round ──
         phase_history.append({
             "from_phase": old_name,
-            "to_phase": new_name,
+            "to_phase": "FINAL",
             "at_round": state["round_id"],
             "j_total": j_hist[-1] if j_hist else None,
             "reason": reason,
         })
-
-        print(f"\n  >>> PHASE TRANSITION: {old_name} -> {new_name}")
-        print(f"      ({reason})")
-
-        # Cache VIC fluxes on VIC_ONLY → ROUTING_ONLY transition.
-        # Clear cache on ROUTING_ONLY → JOINT transition (joint re-runs VIC).
-        shared = _get_shared(state)
-        vic_executor = shared["vic_executor"]
-        output_root = Path(state["output_root"])
-        if old_name == "VIC_ONLY" and new_name == "ROUTING_ONLY":
-            _cache_vic_fluxes_for_routing(
-                vic_executor, state["centers"], output_root, state,
-                state["worker_cfgs"],
-            )
-        elif old_name == "ROUTING_ONLY" and new_name == "JOINT":
-            _clear_vic_flux_cache(vic_executor)
-
-        # Reset direction history on phase change
-        direction_history = {sid: {} for sid in state.get("direction_history", {})}
-
+        print(f"\n  >>> LAST PHASE COMPLETE in {old_name}: {reason}")
+        print(f"  >>> Scheduling mandatory FINAL force-best round.")
         return {
-            "current_phase_idx": next_idx,
-            "current_phase_name": new_name,
-            "rounds_in_current_phase": 0,
+            "phase_transitioned": False,
+            "force_final_round": True,
             "phase_history": phase_history,
-            "phase_transitioned": True,
-            "direction_history": direction_history,
+            "best_msn_in_phase": best_in_phase,
+            "rounds_since_improvement_in_phase": rounds_since_improvement,
         }
 
-    return {"phase_transitioned": False}
+    return {
+        "phase_transitioned": False,
+        "best_msn_in_phase": best_in_phase,
+        "rounds_since_improvement_in_phase": rounds_since_improvement,
+    }
 
 
 def _cache_vic_fluxes_for_routing(
@@ -1697,10 +2034,18 @@ def _clear_vic_flux_cache(vic_executor):
 # ---------------------------------------------------------------------------
 
 def check_round_continuation(state: CalibrationState) -> Dict[str, Any]:
-    """Determine if calibration should continue or stop."""
+    """Determine if calibration should continue or stop.
+
+    Stops when EITHER:
+      - the round we just ran was the mandatory final force-best round
+        (signalled by `is_final_round=True` in state), OR
+      - the global max_rounds safety cap was reached.
+    """
     round_id = state["round_id"]
     max_rounds = state["max_rounds"]
 
+    if state.get("is_final_round", False):
+        return {"should_continue": False}
     if round_id >= max_rounds:
         return {"should_continue": False}
 

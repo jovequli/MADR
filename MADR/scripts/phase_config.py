@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""JSON-driven phase transition engine for TRAv2 calibration.
+"""JSON-driven phase transition engine for MADR calibration.
 
 Supports two config formats:
 1. New pipeline format:
@@ -45,6 +45,7 @@ def load_phase_pipeline(team_config: Dict[str, Any]) -> List[PhaseSpec]:
                 "max_rounds": int(entry.get("max_rounds", 30)),
                 "mc_rounds": int(entry.get("mc_rounds", 0)),
                 "mc_candidates": int(entry.get("mc_candidates", 5)),
+                "patience_rounds": int(entry.get("patience_rounds", 999)),
             }
             pipeline.append(spec)
         return pipeline
@@ -97,27 +98,48 @@ def check_phase_transition(
     pipeline: List[PhaseSpec],
     current_phase_idx: int,
     rounds_in_current_phase: int,
+    rounds_since_improvement: int = 0,
 ) -> Tuple[bool, Optional[int], str]:
     """Check if current phase should transition to the next.
 
+    Two trigger paths:
+      1. **Patience-based:** if `rounds_since_improvement >= patience_rounds`
+         (per-phase config), transition early. This is the dynamic
+         convergence rule.
+      2. **Hard cap:** if `rounds_in_current_phase >= max_rounds`, transition
+         regardless. Safety upper bound.
+
     Returns:
         (should_transition, next_phase_idx, reason)
+
+        `next_phase_idx is None` means there is no next phase (we are
+        finishing the last one). The caller should schedule one final
+        force-best round and then exit.
     """
     if current_phase_idx >= len(pipeline):
         return False, None, ""
 
     current = pipeline[current_phase_idx]
     max_rounds = current.get("max_rounds", 999)
+    patience = current.get("patience_rounds", 999)
+    name = current["name"]
 
+    # 1. Patience-based termination
+    if patience < 999 and rounds_since_improvement >= patience:
+        next_idx = current_phase_idx + 1
+        reason = (f"patience={patience} rounds without best-NSE improvement "
+                  f"in {name} (round {rounds_in_current_phase}/{max_rounds})")
+        if next_idx < len(pipeline):
+            return True, next_idx, reason
+        return True, None, reason
+
+    # 2. Hard max_rounds cap
     if rounds_in_current_phase >= max_rounds:
         next_idx = current_phase_idx + 1
+        reason = f"max_rounds={max_rounds} reached for {name}"
         if next_idx < len(pipeline):
-            reason = (f"max_rounds={max_rounds} reached for "
-                      f"{current['name']}")
             return True, next_idx, reason
-        else:
-            # Last phase exhausted — signal completion
-            return False, None, "all phases completed"
+        return True, None, reason
 
     return False, None, ""
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LangGraph graph builder for TRAv2 calibration.
+"""LangGraph graph builder for SADR calibration.
 
 Connects all node functions from graph_nodes into a StateGraph with
 conditional edges and the batch-level loop for topological processing.
@@ -48,7 +48,7 @@ from . import graph_nodes as N
 
 
 def build_calibration_graph() -> StateGraph:
-    """Build the TRAv2 calibration graph.
+    """Build the SADR calibration graph.
 
     Returns an uncompiled StateGraph.
     """

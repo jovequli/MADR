@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Worker Agent: pure-code sub-basin calibrator (CRAv2 — Leader-Only).
+"""Worker Agent: pure-code sub-basin calibrator (SADR — Leader-Only).
 
 Workers execute Leader's structured instructions (direction + magnitude)
 via WorkerExecutor lookup table. No Worker LLM calls.
@@ -107,11 +107,11 @@ class WorkerMemory:
 
 
 # ---------------------------------------------------------------------------
-# Worker Agent (CRAv2: pure code, no LLM)
+# Worker Agent (SADR: pure code, no LLM)
 # ---------------------------------------------------------------------------
 
 class WorkerAgent:
-    """Pure-code worker agent for one sub-basin (CRAv2 Leader-Only).
+    """Pure-code worker agent for one sub-basin (SADR Leader-Only).
 
     Receives Leader's structured instruction (direction + magnitude per param)
     and converts to concrete parameter values via WorkerExecutor lookup table.

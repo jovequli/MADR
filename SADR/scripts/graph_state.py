@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LangGraph state schema for CRAv2 calibration.
+"""LangGraph state schema for SADR calibration.
 
 Defines the CalibrationState TypedDict used as the graph's state,
 plus the merge_worker_results reducer for Send() fan-out.
@@ -61,7 +61,6 @@ class CalibrationState(TypedDict, total=False):
     dry_run: bool
     param_ranges: Dict[str, Any]           # {param: (lo, hi)}
     objective_weights: Dict[str, float]
-    stop_rules: Dict[str, Any]
     worker_cfgs: List[Dict[str, Any]]
     upstream_map: Dict[str, List[str]]     # {basin: [upstream_basins]}
     full_upstream_map: Dict[str, List[str]]
@@ -122,7 +121,7 @@ class CalibrationState(TypedDict, total=False):
     diagnostics_prompt_block: str
     coordination_result: Dict[str, Any]
 
-    # ── Escape states (active in CRAv2) ──
+    # ── Escape states (active in SADR) ──
     escape_states: Dict[str, Dict]         # {sid: {in_escape, tier, agent_stagnation, ...}}
     decay_factor: float                    # step-size decay (0.05~1.0)
 
@@ -135,6 +134,9 @@ class CalibrationState(TypedDict, total=False):
     # ── Control flow signals ──
     should_continue: bool                  # False → go to finalize
     phase_transitioned: bool               # True if phase just changed
+    force_final_round: bool                # True → next round is force_best final
+    best_msn_in_phase: float               # best mean_sub_nse seen in current phase
+    rounds_since_improvement_in_phase: int # patience counter
 
     # ── Worker execution context (for Send()) ──
     subbasin_id: str                       # set by Send() for worker_execute

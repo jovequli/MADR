@@ -197,7 +197,7 @@ def run_initial_exploration(
                         sid, elapsed, best["nse"], best["sample_id"],
                         best["label"], min(top5_nse), max(top5_nse))
 
-            # Build compact summary for Leader prompt (matches original TRA format)
+            # Build compact summary for Leader prompt (matches original MADR format)
             summary = (
                 f"{sid}: best_NSE={best['nse']:.4f} ({best['label']}) | "
                 f"top5=[{', '.join(f'{n:.3f}' for n in top5_nse)}] | "

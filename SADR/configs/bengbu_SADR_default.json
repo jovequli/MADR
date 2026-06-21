@@ -19,11 +19,6 @@
     "mean_nse": 0.9,
     "consistency": 0.1
   },
-  "stop_rules": {
-    "outlet_nse_target": 0.85,
-    "min_improvement": 0.003,
-    "patience_rounds": 5
-  },
   "phase_config": {
     "pipeline": [
       {

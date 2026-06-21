@@ -62,8 +62,25 @@ Three mechanisms organize coordination among Workers:
 
 - **Multi-candidate generation** (early rounds of VIC-Only and Routing-Only — first 11 and first 5 respectively): every Worker is invoked three times with distinct strategy tags (`conservative`, `moderate`, `bold`); the three candidate parameter sets are simulated and the one achieving the highest NSE is adopted as that round's proposal.
 - **Round 1 special case**: the Worker LLM is not invoked. The model runs with the configured default parameters, providing the baseline against which the Leader's first guidance is issued.
+- **Final round (force-best)**: once the last phase ends, MADR runs one mandatory final round in which each Worker uses its own per-sub-basin best historical parameters. This delivers a clean end-state composite for downstream use.
 
 Each MADR run performs **170 model evaluations per sub-basin**: 50 in the Exploration Stage + 120 across 90 Agent Rounds (75 single-candidate × 1 + 15 multi-candidate × 3).
+
+### Optional: early termination via per-phase patience
+
+By default each phase runs its full round budget. Setting `patience_rounds` on a pipeline entry enables a no-improvement check: once the in-phase mean sub-basin NSE has not improved for `patience_rounds` consecutive **single-candidate** rounds, the phase ends early and the next phase begins. Multi-candidate rounds are excluded from the counter so aggressive exploration does not trip the trigger.
+
+```jsonc
+"phase_config": {
+  "pipeline": [
+    {"name": "VIC_ONLY",     "max_rounds": 50, "mc_rounds": 11, "mc_candidates": 3, "patience_rounds": 10},
+    {"name": "ROUTING_ONLY", "max_rounds": 30, "mc_rounds":  5, "mc_candidates": 3, "patience_rounds":  5},
+    {"name": "JOINT",        "max_rounds": 10, "mc_rounds":  0, "mc_candidates": 0, "patience_rounds":  3}
+  ]
+}
+```
+
+Omitting `patience_rounds` (or setting it to `999`) disables the check for that phase, reproducing the fixed-budget behavior used in the paper. The `max_rounds` cap always applies regardless of patience. After the last phase ends — whether by patience or by hitting its cap — the mandatory final force-best round still runs.
 
 ---
 
@@ -164,6 +181,21 @@ python -m scripts.run_langgraph \
 --thread-id ID        Thread ID for checkpoint tracking (default: "default")
 ```
 
+### Per-round outputs
+
+Each completed round writes the following inside its `round_<NNN>/` directory:
+
+| File | Content |
+|---|---|
+| `round_meta.json` | Round metadata: phase, mean sub-basin NSE, J_total, leader/worker token usage, timings |
+| `leader_decision.md` | Leader's J_total, decision, overall assessment, and next-round strategy |
+| `results/worker_<basin>.json` | Worker's selected parameters, metrics, score, reasoning text, leader context received; for multi-candidate rounds, each candidate's full parameter set and reasoning is preserved under `mc_detail` |
+| `results/worker_<basin>_diagnostic.json` | Structured post-round diagnosis per sub-basin: primary issue, severity, VIC/routing/upstream responsibility split, recommended parameter adjustments, ledger snapshot |
+| `results/worker_<basin>_diagnostic.md` | Human-readable version of the same diagnosis |
+| `routing_result/<basin>/` | Lohmann routing outputs (per MC candidate when applicable) |
+
+Worker reasoning and post-round diagnoses are produced by the existing loop; no extra LLM calls are made to generate them.
+
 ---
 
 ## Project Structure
@@ -252,6 +284,22 @@ These match the two internal-mechanism ablations reported in the paper.
 ## Switching LLM Providers
 
 The default config uses Claude (`claude-sonnet-4-6`). All tested providers (Gemini, Claude, OpenAI, DeepSeek, Grok, Kimi) are supported by `llm_client.py` out of the box — just change the `model`, `provider`, and `api_key_env` fields in the config and set the corresponding environment variable. See [docs/api_provider_configs.md](docs/api_provider_configs.md) for copy-paste-ready snippets and provider-specific notes.
+
+---
+
+## Roadmap
+
+### Other hydrological models
+
+The current implementation is wired to VIC + Lohmann routing, but the framework itself is model-agnostic. Workers interact with the simulation only through the parameter set they propose and the diagnostic metrics returned from each run. We plan to extend MADR to other distributed hydrological models, including **SWAT**, **wflow**, and **WRF-Hydro**, by swapping the simulation block while keeping the LLM agents, the diagnostic rules table, and the topological scheduling intact.
+
+### Beyond hydrology
+
+More broadly, the multi-agent diagnostic-reasoning pattern is well suited to other multi-objective optimization problems in the Earth and water sciences. We plan to validate it in:
+
+- **Reservoir dispatching** — balancing flood control, water supply, hydropower, and ecological flow objectives across cascaded reservoirs.
+- **Water resource allocation** — coordinating allocations across competing demands, regions, and basins under multi-objective constraints.
+- **Other Earth-science calibration problems** — land-surface, groundwater, and coupled Earth-system models, where process-level diagnostic signals can guide LLM-driven parameter tuning under multi-objective trade-offs.
 
 ---
 
