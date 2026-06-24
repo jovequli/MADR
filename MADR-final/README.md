@@ -27,6 +27,18 @@ build of the same code, see the sibling **MADR-final-CLI** tree.
 
 ---
 
+## Framework overview
+
+The MADR framework treats both the hydrological model and the LLM provider as pluggable. Three model combinations ship today; new ones are added by dropping in a `ModelExecutor` subclass plus a `prompts/<combination>/` folder.
+
+![MADR framework — replaceable models and LLM providers](docs/framework.png)
+
+The LangGraph node-level workflow (Worker activation → simulation → diagnostics → Leader review → patience check → next round / finalize) is identical across combinations:
+
+![MADR LangGraph node-level workflow](docs/langgraph_workflow.png)
+
+---
+
 ## Quick start
 
 ```bash
@@ -294,8 +306,13 @@ etc.
 ```text
 MADR-final/
 ├── README.md                                this file
-├── configs/                                 14 example team configs (vic_routing, vic_cama_flood, swat)
-├── docs/specs/                              architecture spec
+├── configs/                                 4 example team configs:
+│                                             _template.json, vic_routing_bengbu.json,
+│                                             vic_cama_flood_songhua.json, swat_yellow.json
+├── docs/
+│   ├── framework.png                        framework diagram (used in this README)
+│   ├── langgraph_workflow.png               LangGraph node-level diagram
+│   └── architecture.md                      multi-model design spec
 ├── prompts/
 │   ├── vic_routing/                         6 files
 │   ├── vic_cama_flood/                      6 files

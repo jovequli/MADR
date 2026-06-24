@@ -249,14 +249,12 @@ MADR/                                   # Multi-Agent Diagnostic Reasoning
 │   ├── vic_executor.py                 # VIC execution
 │   ├── vic_runner.py                   # VIC run management
 │   └── context_manager.py              # Context / memory management
-└── docs/LangGraph_Workflow.png         # LangGraph workflow diagram
 
 SADR/                                   # Single-Agent Diagnostic Reasoning ablation
 ├── configs/bengbu_SADR_default.json
 ├── prompts/                            # Leader-only prompts (no worker prompts)
 ├── schemas/leader_output.json
-├── scripts/                            # Same modules; LLM Worker replaced by a rule-based executor
-└── docs/LangGraph_Workflow.png
+└── scripts/                            # Same modules; LLM Worker replaced by a rule-based executor
 
 routing/                                # Lohmann routing model (Fortran source + README)
 ├── Makefile

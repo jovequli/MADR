@@ -1,6 +1,5 @@
 # Multi-model architecture for MADR.cli
 
-**Date:** 2026-06-23
 **Scope:** Make MADR.cli support multiple model combinations side-by-side, starting with VIC+Routing (existing) and VIC+CaMa-Flood (new).
 
 ## Goals
