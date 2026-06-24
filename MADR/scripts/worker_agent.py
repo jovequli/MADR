@@ -35,7 +35,8 @@ from .worker_diagnostics import diagnose_round, DiagnosisResult
 
 logger = logging.getLogger(__name__)
 
-PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
+from .prompt_loader import resolve_prompts_dir
+
 SCHEMAS_DIR = Path(__file__).parent.parent / "schemas"
 
 
@@ -201,6 +202,7 @@ class WorkerAgent:
         neighbors_downstream: Optional[List[str]] = None,
         param_ranges: Optional[Dict[str, list]] = None,
         window_size: int = 5,
+        model_combination: Optional[str] = None,
         **kwargs,
     ):
         self.agent_id = agent_id
@@ -225,9 +227,13 @@ class WorkerAgent:
         self.executor = WorkerExecutor(param_ranges=self.ranges)
         self._last_diagnosis: Optional[DiagnosisResult] = None
 
+        # Resolve the prompts directory for the active model combination.
+        prompts_dir = resolve_prompts_dir(model_combination)
+        self.model_combination = prompts_dir.name
+
         # Load compact prompts (ZoneAgent style)
-        self.system_prompt = _load_text(PROMPTS_DIR / "worker_system.md")
-        self.propose_template = _load_text(PROMPTS_DIR / "worker_propose.md")
+        self.system_prompt = _load_text(prompts_dir / "worker_system.md")
+        self.propose_template = _load_text(prompts_dir / "worker_propose.md")
 
     # ------------------------------------------------------------------
     # NEW: LLM-driven parameter proposal (ZoneAgent style)

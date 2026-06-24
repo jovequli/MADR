@@ -197,8 +197,13 @@ class VICExecutor:
         log_path: str = "",
         upstream_routing_info: Optional[List[UpstreamRoutingInfo]] = None,
         upstream_soil_info: Optional[List["UpstreamSoilInfo"]] = None,
+        upstream_cama_info: Optional[List[Any]] = None,
     ) -> Tuple[bool, Dict[str, float]]:
-        """Execute VIC model (or simulation) for a parameter set."""
+        """Execute VIC model (or simulation) for a parameter set.
+
+        `upstream_cama_info` is accepted for a uniform executor interface but is
+        unused here — CaMa channel locking only applies to vic_cama_flood.
+        """
         if self.mode == "simulate":
             metrics = simulate_metrics(subbasin_id, run_id, candidate_id, params)
             return True, metrics

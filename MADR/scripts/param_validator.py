@@ -19,42 +19,77 @@ logger = logging.getLogger(__name__)
 # Default parameter specification (can be overridden by SKILL.md spec)
 # ---------------------------------------------------------------------------
 
+# VIC+Lohmann routing params (the original 8-param set).
 PARAM_KEYS = ["binfilt", "Ds", "Dsmax", "Ws", "soil_d2", "soil_d3", "velocity", "diffusivity"]
 
 # Soil-only parameter keys (for VIC soil file modification)
 SOIL_PARAM_KEYS = ["binfilt", "Ds", "Dsmax", "Ws", "soil_d2", "soil_d3"]
 
-# Routing parameter keys
+# Lohmann routing parameter keys
 ROUTING_PARAM_KEYS = ["velocity", "diffusivity"]
 
-# Routing defaults (used in VIC_ONLY phase)
+# CaMa-Flood channel parameter keys (used by the vic_cama_flood combination).
+CAMA_PARAM_KEYS = ["Hc", "Hmin", "Wc", "Wmin"]
+
+# SWAT+ calibration parameter keys (used by the swat combination).
+# Mirrors the list verified against cal_parms.cal in the SWAT+ port.
+SWAT_PARAM_KEYS = [
+    "cn2", "esco", "awc", "surlag", "lat_ttime", "canmx",
+    "epco", "perco", "alpha", "revap_co", "revap_min", "flo_min", "deep_seep",
+    "snofall_tmp", "snomelt_tmp", "snomelt_max", "snomelt_min", "snomelt_lag",
+]
+
+# Routing defaults (used when the routing slot is "frozen" in VIC_ONLY).
 ROUTING_DEFAULTS = {"velocity": 1.5, "diffusivity": 800.0}
 
 
 class CalibrationPhase(str, Enum):
-    """Calibration phase controlling which parameters are tunable."""
-    VIC_ONLY = "VIC_ONLY"           # Only soil params tunable
-    ROUTING_ONLY = "ROUTING_ONLY"   # Only routing params tunable
-    JOINT = "JOINT"                 # All params tunable
+    """Calibration phase controlling which parameters are tunable.
+
+    Phase names are shared across model combinations; each executor declares
+    its own tunable-keys table for the combination it implements (see
+    ``ModelExecutor.tunable_keys_by_phase``). The helpers below are the
+    *default* mappings used when a caller needs locked/tunable keys without
+    a live executor in hand.
+    """
+    VIC_ONLY = "VIC_ONLY"                     # Land surface only
+    ROUTING_ONLY = "ROUTING_ONLY"             # Lohmann routing (vic_routing combo)
+    CAMA_FLOOD_ONLY = "CAMA_FLOOD_ONLY"       # CaMa-Flood routing (vic_cama_flood combo)
+    SWATPLUS_HRU = "SWATPLUS_HRU"             # SWAT+ all-params (swat combo single-phase)
+    JOINT = "JOINT"                           # All params tunable
 
 
 def get_tunable_keys(phase: CalibrationPhase) -> List[str]:
-    """Return parameter keys that are tunable in the given phase."""
+    """Default tunable-key set per phase (combination-agnostic).
+
+    Each executor overrides this via its own ``tunable_keys_by_phase`` for
+    accuracy; this helper is the safe lowest-common-denominator that does
+    not crash when called from code that doesn't have an executor handle.
+    """
     if phase == CalibrationPhase.VIC_ONLY:
         return list(SOIL_PARAM_KEYS)
     elif phase == CalibrationPhase.ROUTING_ONLY:
         return list(ROUTING_PARAM_KEYS)
-    else:
-        return list(PARAM_KEYS)
+    elif phase == CalibrationPhase.CAMA_FLOOD_ONLY:
+        return list(CAMA_PARAM_KEYS)
+    elif phase == CalibrationPhase.SWATPLUS_HRU:
+        return list(SWAT_PARAM_KEYS)
+    else:  # JOINT
+        return list(PARAM_KEYS) + list(CAMA_PARAM_KEYS) + list(SWAT_PARAM_KEYS)
 
 
 def get_locked_keys(phase: CalibrationPhase) -> List[str]:
-    """Return parameter keys that are LOCKED in the given phase."""
+    """Default locked-key set per phase. See get_tunable_keys for caveats."""
     if phase == CalibrationPhase.VIC_ONLY:
-        return list(ROUTING_PARAM_KEYS)
+        return list(ROUTING_PARAM_KEYS) + list(CAMA_PARAM_KEYS)
     elif phase == CalibrationPhase.ROUTING_ONLY:
-        return list(SOIL_PARAM_KEYS)
-    else:
+        return list(SOIL_PARAM_KEYS) + list(CAMA_PARAM_KEYS)
+    elif phase == CalibrationPhase.CAMA_FLOOD_ONLY:
+        return list(SOIL_PARAM_KEYS) + list(ROUTING_PARAM_KEYS)
+    elif phase == CalibrationPhase.SWATPLUS_HRU:
+        # SWAT+ tunes its own param set; everything VIC/CaMa is locked.
+        return list(PARAM_KEYS) + list(CAMA_PARAM_KEYS)
+    else:  # JOINT
         return []
 
 
@@ -137,6 +172,14 @@ def normalize_params(
     for k in PARAM_KEYS:
         lo, hi = rng.get(k, DEFAULT_RANGES[k])
         out[k] = clamp(float(params.get(k, (lo + hi) / 2)), lo, hi)
+
+    # CaMa-Flood channel params (vic_cama_flood combination): normalize only
+    # when present in the supplied ranges, so vic_routing configs — which carry
+    # no CaMa keys in param_ranges — keep bit-identical behaviour.
+    for k in CAMA_PARAM_KEYS:
+        if k in rng:
+            lo, hi = rng[k]
+            out[k] = clamp(float(params.get(k, (lo + hi) / 2)), lo, hi)
 
     # Enforce minimum non-zero values
     for k, min_val in MIN_NONZERO.items():

@@ -30,7 +30,8 @@ from .param_validator import (
 
 logger = logging.getLogger(__name__)
 
-PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
+from .prompt_loader import resolve_prompts_dir
+
 SCHEMAS_DIR = Path(__file__).parent.parent / "schemas"
 
 
@@ -368,13 +369,16 @@ class LeaderAgent:
         llm_client: LLMClient,
         workers: List[Dict[str, Any]],
         objective_weights: Dict[str, float],
+        stop_rules: Dict[str, Any],
         param_ranges: Optional[Dict[str, list]] = None,
+        model_combination: Optional[str] = None,
     ):
         self.agent_id = agent_id
         self.llm = llm_client
         self.workers = workers
         self.worker_ids = {w["subbasin_id"]: w for w in workers}
         self.objective_weights = objective_weights
+        self.stop_rules = stop_rules
         self.memory = LeaderMemory()
 
         # Convert list ranges to tuple ranges
@@ -385,12 +389,16 @@ class LeaderAgent:
         else:
             self.ranges = dict(DEFAULT_RANGES)
 
+        # Resolve the prompts directory for the active model combination.
+        prompts_dir = resolve_prompts_dir(model_combination)
+        self.model_combination = prompts_dir.name
+
         # Load prompts
-        self.system_prompt = _load_text(PROMPTS_DIR / "leader_system.md")
-        self.review_template = _load_text(PROMPTS_DIR / "leader_review.md")
+        self.system_prompt = _load_text(prompts_dir / "leader_system.md")
+        self.review_template = _load_text(prompts_dir / "leader_review.md")
 
         # Append parameter knowledge if available
-        param_knowledge_path = PROMPTS_DIR / "param_knowledge_leader.md"
+        param_knowledge_path = prompts_dir / "param_knowledge_leader.md"
         if param_knowledge_path.exists():
             self.system_prompt += "\n\n" + _load_text(param_knowledge_path)
 
@@ -450,7 +458,7 @@ class LeaderAgent:
         """Build the review prompt without calling the LLM.
 
         V3: Uses full history table instead of verbose per-round blocks.
-        Removes centers/radii/weights JSON (saves ~750 tokens).
+        Removes centers/radii/weights/stop_rules JSON (saves ~750 tokens).
 
         Returns:
             (review_prompt, system_prompt, j_total, outlet_nse, mean_sub_nse, consistency_penalty)
@@ -669,6 +677,10 @@ class LeaderAgent:
 
         return normalized
 
+    def should_stop(self, decision: Dict) -> bool:
+        """Check if leader decided to stop."""
+        return decision.get("stop_or_continue") == "stop"
+
     def _fallback_decision(
         self,
         round_id: int,
@@ -691,8 +703,12 @@ class LeaderAgent:
         else:
             trend = "improving"
 
-        # Phase termination is owned by check_phase_transition_node (per-phase
-        # patience / max_rounds). The leader's recommendation is informational.
+        # Check stop conditions — only allowed in JOINT phase
+        target = float(self.stop_rules.get("outlet_nse_target", 0.85))
+        patience = int(self.stop_rules.get("patience_rounds", 3))
+        min_imp = float(self.stop_rules.get("min_improvement", 0.003))
+
+        # No early stopping — all phases run their full allocated rounds
         phase_rec = "stay"
 
         # Build per-worker guidance (simple rule-based)

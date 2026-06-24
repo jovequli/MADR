@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LangGraph node functions for MADR calibration.
+"""LangGraph node functions for TRAv2 calibration.
 
 Each function takes CalibrationState and returns a partial state update dict.
 All domain logic is delegated to existing modules; these nodes are pure
@@ -49,6 +49,7 @@ from .vic_runner import UpstreamSoilInfo
 from .leader_agent import LeaderAgent, LeaderMemory
 from .worker_agent import WorkerAgent, WorkerMemory
 from .vic_executor import VICExecutor, VICConfig
+from .executors import make_executor, ModelExecutor
 from .leader_coordinator import LeaderCoordinator
 from .worker_diagnostics import diagnose_round
 
@@ -126,12 +127,15 @@ def _get_shared(state: CalibrationState) -> Dict[str, Any]:
         leader_llm = _DummyLLMClient("dry-run-leader")
     else:
         leader_llm = _create_llm_client(leader_cfg)
+    model_combination = state.get("model_combination", "vic_routing")
     leader = LeaderAgent(
         agent_id=leader_cfg["agent_id"],
         llm_client=leader_llm,
         workers=worker_cfgs,
         objective_weights=state.get("objective_weights", {}),
+        stop_rules=state.get("stop_rules", {}),
         param_ranges=range_lists,
+        model_combination=model_combination,
     )
 
     # Workers
@@ -151,14 +155,48 @@ def _get_shared(state: CalibrationState) -> Dict[str, Any]:
             neighbors_downstream=w_cfg.get("neighbors_downstream", []),
             param_ranges=range_lists,
             window_size=int(w_cfg.get("memory_window", 5)),
+            model_combination=model_combination,
         )
         workers[sid].set_output_dir(str(output_root))
 
-    # VIC executor
-    vic_executor = VICExecutor(mode=mode)
+    # Model-combination executor (VIC+Routing, VIC+CaMa-Flood, ...)
+    # `vic_executor` is kept as the variable name for backward compat with the
+    # many call sites below; the object is now a ModelExecutor whose `.run()`
+    # / `.register_basin()` / `.validate_all()` surface is the same.
+    vic_executor: ModelExecutor = make_executor(model_combination, mode=mode)
     if mode == "real":
+        top_cama_cfg = cfg.get("cama_flood_config", {})
+        sim_period = cfg.get("simulation_period", {})
         for w_cfg in worker_cfgs:
             sid = w_cfg["subbasin_id"]
+
+            if model_combination == "swat":
+                # SWAT+ basin config has its own field layout (TxtInOut template,
+                # HRU ids, channel id, simulation dates). Build a SWATPlusConfig
+                # and register; SWATExecutor.register_basin coerces dict->config.
+                from .swatplus_executor import SWATPlusConfig
+                start_date = sim_period.get("start_date") or f"{sim_period.get('start_year', 1980)}-01-01"
+                end_date = sim_period.get("end_date") or f"{sim_period.get('end_year', 1990)}-12-31"
+                scratch_root = cfg.get("swatplus_scratch_dir") or str(output_root)
+                swat_cfg = SWATPlusConfig(
+                    basin_name=sid,
+                    base_output_dir=str(scratch_root),
+                    txtinout_template=w_cfg.get("txtinout_template", cfg.get("txtinout_template", "")),
+                    swatplus_exe=w_cfg.get("swatplus_exe", cfg.get("swatplus_exe", "")),
+                    obs_file=w_cfg.get("obs_file", ""),
+                    hru_fids=list(w_cfg.get("hru_fids", [])),
+                    subbasin_attrs_file=w_cfg.get(
+                        "subbasin_attrs_file",
+                        cfg.get("subbasin_attrs_file", ""),
+                    ),
+                    channel_id=int(w_cfg.get("channel_id", 0)),
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                vic_executor.register_basin(sid, swat_cfg)
+                continue
+
+            # VIC-based combos build a VICConfig from the per-worker fields.
             vic_cfg = VICConfig(
                 basin_name=sid,
                 base_output_dir=str(output_root),
@@ -168,20 +206,26 @@ def _get_shared(state: CalibrationState) -> Dict[str, Any]:
                 rout_template_dir=w_cfg.get("rout_template_dir", ""),
                 vic_exe=w_cfg.get("vic_exe", cfg.get("vic_exe", "")),
                 rout_exe=w_cfg.get("rout_exe", cfg.get("rout_exe", "")),
-                start_year=cfg.get("simulation_period", {}).get("start_year", 1979),
-                end_year=cfg.get("simulation_period", {}).get("end_year", 1980),
+                start_year=sim_period.get("start_year", 1979),
+                end_year=sim_period.get("end_year", 1980),
                 flux_prefix=w_cfg.get("flux_prefix", "huaihe_fluxes_"),
                 vic_flux_source=w_cfg.get("vic_flux_source", ""),
             )
-            vic_executor.register_basin(sid, vic_cfg)
+            if model_combination == "vic_cama_flood":
+                # Per-worker CaMa config overrides shared top-level defaults so a
+                # multi-station run gives each basin its own map/diminfo/outlet/obs.
+                w_cama = {**top_cama_cfg, **w_cfg.get("cama_flood_config", {})}
+                vic_executor.register_basin(sid, {"vic": vic_cfg, "cama_flood": w_cama})
+            else:
+                vic_executor.register_basin(sid, vic_cfg)
 
-        # Validate all VIC paths before any execution
+        # Validate all model paths before any execution.
         issues = vic_executor.validate_all()
         if issues:
             for basin, missing in issues.items():
-                logger.error("VIC config [%s] missing paths: %s", basin, missing)
+                logger.error("Model config [%s] missing paths: %s", basin, missing)
             raise RuntimeError(
-                f"VIC path validation failed for {len(issues)} basin(s): "
+                f"Model path validation failed for {len(issues)} basin(s): "
                 + ", ".join(f"{b}({len(m)} missing)" for b, m in issues.items())
             )
 
@@ -396,6 +440,44 @@ def _build_upstream_soil_info(
     return infos
 
 
+def _build_upstream_cama_info(
+    subbasin_id: str, state: CalibrationState, worker_cfgs: List[Dict],
+) -> List[Dict[str, Any]]:
+    """Per-reach CaMa channel-param lock (vic_cama_flood nested basins).
+
+    For each upstream basin, return its locked channel params (Hc/Hmin/Wc/Wmin
+    from the current centers — fixed after the upstream batch) plus that basin's
+    cama_flood_config (so the executor can find its map and splice the upstream
+    reach's channel geometry into the downstream grid). Mirrors
+    _build_upstream_soil_info; returns [] for headwaters or vic_routing.
+    """
+    upstream_map = state["upstream_map"]
+    full_upstream_map = state.get("full_upstream_map", {})
+    centers = state["centers"]
+
+    all_upstream = _collect_all_upstream(subbasin_id, upstream_map, full_upstream_map)
+    if not all_upstream:
+        return []
+
+    worker_cfg_by_sid = {w["subbasin_id"]: w for w in worker_cfgs}
+    infos: List[Dict[str, Any]] = []
+    for up_sid in all_upstream:
+        up_cfg = worker_cfg_by_sid.get(up_sid)
+        if not up_cfg:
+            continue
+        cama_cfg = up_cfg.get("cama_flood_config")
+        if not cama_cfg:
+            continue
+        up_center = centers.get(up_sid, {})
+        params = {k: up_center[k] for k in ("Hc", "Hmin", "Wc", "Wmin")
+                  if k in up_center}
+        if params:
+            infos.append({"subbasin_id": up_sid,
+                          "params": params,
+                          "cama_flood_config": cama_cfg})
+    return infos
+
+
 # ---------------------------------------------------------------------------
 # Anti-flip direction momentum
 # ---------------------------------------------------------------------------
@@ -497,8 +579,11 @@ def init_calibration(state: CalibrationState) -> Dict[str, Any]:
     phase_pipeline = load_phase_pipeline(cfg)
     max_rounds = state.get("max_rounds", 0) or get_total_max_rounds(phase_pipeline)
 
-    # Objective weights
+    # Objective weights and stop rules
     objective_weights = cfg.get("objective_weights", {"mean_nse": 0.90, "consistency": 0.10})
+    stop_rules = cfg.get("stop_rules", {
+        "outlet_nse_target": 0.85, "min_improvement": 0.003, "patience_rounds": 3,
+    })
 
     # MC config
     mc_cfg = cfg.get("multi_candidate", {})
@@ -524,6 +609,7 @@ def init_calibration(state: CalibrationState) -> Dict[str, Any]:
         "mode": state.get("mode", "simulate"),
         "max_rounds": max_rounds,
         "objective_weights": objective_weights,
+        "stop_rules": stop_rules,
         "initial_phase": phase_pipeline[0]["name"] if phase_pipeline else "VIC_ONLY",
         "phase_pipeline": phase_pipeline,
         "initial_centers": centers,
@@ -548,6 +634,7 @@ def init_calibration(state: CalibrationState) -> Dict[str, Any]:
         "topo_levels": topo_levels,
         "param_ranges": param_ranges,
         "objective_weights": objective_weights,
+        "stop_rules": stop_rules,
         "phase_pipeline": phase_pipeline,
         "phase_nse_thresholds": phase_nse_thresholds,
         "max_rounds": max_rounds,
@@ -580,6 +667,9 @@ def init_calibration(state: CalibrationState) -> Dict[str, Any]:
         "force_final_round": False,
         "best_msn_in_phase": float("-inf"),
         "rounds_since_improvement_in_phase": 0,
+        # Which model combination's prompts + executor this run uses.
+        # Default "vic_routing" preserves pre-refactor behaviour.
+        "model_combination": cfg.get("model_combination", "vic_routing"),
     }
 
 
@@ -872,7 +962,7 @@ def execute_batch_workers(state: CalibrationState) -> Dict[str, Any]:
         if wmem_data:
             worker.memory = WorkerMemory.from_checkpoint(wmem_data)
 
-        # Inject per-basin exploration summary for Worker prompt (matches original MADR)
+        # Inject per-basin exploration summary for Worker prompt (matches original TRA)
         full_explore = state.get("exploration_summary", "")
         if full_explore:
             basin_lines = [ln for ln in full_explore.split("\n") if sid in ln]
@@ -911,20 +1001,21 @@ def execute_batch_workers(state: CalibrationState) -> Dict[str, Any]:
         # Upstream info
         up_routing_info = _build_upstream_routing_info(sid, state, worker_cfgs)
         up_soil_info = _build_upstream_soil_info(sid, state, worker_cfgs)
+        up_cama_info = _build_upstream_cama_info(sid, state, worker_cfgs)
 
         # R1 (no leader decision yet) → exact defaults, skip MC even if enabled
         if use_multi and prev_decision is not None:
             result, mc_line = _run_worker_multi(
                 worker, vic_executor, round_id, center, radius,
                 guidance, round_dir, state.get("mc_n_candidates", 5),
-                phase, up_routing_info, up_soil_info,
+                phase, up_routing_info, up_soil_info, up_cama_info,
             )
             return result, mc_line
         else:
             result = _run_worker_single(
                 worker, vic_executor, round_id, center, radius,
                 guidance, round_dir, phase, up_routing_info, up_soil_info,
-                force_best=force_best,
+                up_cama_info, force_best=force_best,
             )
             return result, ""
 
@@ -970,7 +1061,7 @@ def execute_batch_workers(state: CalibrationState) -> Dict[str, Any]:
 
 def _run_worker_single(
     worker, vic_executor, round_id, center, radius, guidance,
-    round_dir, phase, up_routing, up_soil, force_best=False,
+    round_dir, phase, up_routing, up_soil, up_cama=None, force_best=False,
 ) -> Dict:
     """Run a single-candidate worker round. Mirrors run_worker_round()."""
     sid = worker.subbasin_id
@@ -1029,19 +1120,14 @@ def _run_worker_single(
         phase_tag=f"round_{round_id}_c1",
         upstream_routing_info=up_routing,
         upstream_soil_info=up_soil,
+        upstream_cama_info=up_cama,
     )
     score = ok and _score_row(metrics) or float("-inf")
     duration = (dt.datetime.now(dt.timezone.utc) - t0).total_seconds()
 
-    # Save routing result
-    vic_cfg = vic_executor._vic_configs.get(sid)
-    if ok and vic_cfg:
-        src = Path(vic_cfg.base_output_dir) / f"{sid}_calibration_ai" / "current_run" / "routing_result"
-        if src.exists():
-            dst = round_dir / "routing_result" / sid
-            if dst.exists():
-                shutil.rmtree(dst)
-            shutil.copytree(str(src), str(dst))
+    # Save routing result (executor knows its own output layout)
+    if ok:
+        vic_executor.copy_routing_artifacts(sid, round_dir / "routing_result" / sid)
 
     _write_json(round_dir / "results" / f"worker_{sid}.json", {
         "round_id": round_id, "subbasin_id": sid,
@@ -1068,9 +1154,9 @@ def _run_worker_single(
 
 def _run_worker_multi(
     worker, vic_executor, round_id, center, radius, guidance,
-    round_dir, n_candidates, phase, up_routing, up_soil,
+    round_dir, n_candidates, phase, up_routing, up_soil, up_cama=None,
 ) -> Tuple[Dict, str]:
-    """Run multi-candidate worker round (MADR: LLM-based).
+    """Run multi-candidate worker round (TRAv2: LLM-based).
 
     1. Call Worker LLM n_candidates times (conservative / moderate / bold).
     2. Each call produces a full parameter set directly.
@@ -1144,7 +1230,6 @@ def _run_worker_multi(
 
     # ── Step 3: Evaluate all candidates ──
     eval_results = []
-    vic_cfg = vic_executor._vic_configs.get(sid)
     for i, (params, label, reasoning) in enumerate(candidates):
         ok, metrics = vic_executor.run(
             subbasin_id=sid,
@@ -1154,15 +1239,15 @@ def _run_worker_multi(
             phase_tag=f"round_{round_id}_mc{i+1}_{label}",
             upstream_routing_info=up_routing,
             upstream_soil_info=up_soil,
+            upstream_cama_info=up_cama,
         )
         # Save this candidate's routing result before next run overwrites it
-        if ok and vic_cfg:
-            src = Path(vic_cfg.base_output_dir) / f"{sid}_calibration_ai" / "current_run" / "routing_result"
-            if src.exists():
-                dst = round_dir / "routing_result" / sid / f"c{i+1}_{label}"
-                if dst.exists():
-                    shutil.rmtree(dst)
-                shutil.copytree(str(src), str(dst))
+        if ok:
+            vic_executor.copy_routing_artifacts(
+                sid,
+                round_dir / "routing_result" / sid,
+                candidate_tag=f"c{i+1}_{label}",
+            )
         nse = metrics.get("NSE", float("-inf")) if ok else float("-inf")
         score = ok and _score_row(metrics) or float("-inf")
         eval_results.append({
@@ -1922,15 +2007,24 @@ def check_phase_transition_node(state: CalibrationState) -> Dict[str, Any]:
             print(f"      ({reason})")
 
             shared = _get_shared(state)
-            vic_executor = shared["vic_executor"]
+            executor: ModelExecutor = shared["vic_executor"]
             output_root = Path(state["output_root"])
-            if old_name == "VIC_ONLY" and new_name == "ROUTING_ONLY":
-                _cache_vic_fluxes_for_routing(
-                    vic_executor, state["centers"], output_root, state,
-                    state["worker_cfgs"],
+            # Land-surface → routing transition: cache the land-surface output
+            # so routing-only rounds can skip rerunning it. Generic phase-name
+            # matching here covers VIC_ONLY → ROUTING_ONLY (vic_routing combo)
+            # and VIC_ONLY → CAMA_FLOOD_ONLY (vic_cama_flood combo).
+            land_to_routing = old_name == "VIC_ONLY" and new_name in (
+                "ROUTING_ONLY", "CAMA_FLOOD_ONLY",
+            )
+            routing_to_joint = old_name in (
+                "ROUTING_ONLY", "CAMA_FLOOD_ONLY",
+            ) and new_name == "JOINT"
+            if land_to_routing:
+                executor.cache_intermediates_for_routing(
+                    state["centers"], output_root, state, state["worker_cfgs"],
                 )
-            elif old_name == "ROUTING_ONLY" and new_name == "JOINT":
-                _clear_vic_flux_cache(vic_executor)
+            elif routing_to_joint:
+                executor.clear_intermediate_cache()
 
             direction_history = {sid: {} for sid in state.get("direction_history", {})}
             return {
@@ -1969,64 +2063,10 @@ def check_phase_transition_node(state: CalibrationState) -> Dict[str, Any]:
     }
 
 
-def _cache_vic_fluxes_for_routing(
-    vic_executor, centers, output_root, state, worker_cfgs,
-):
-    """Run VIC once per basin with its best soil params, snapshot the
-    post-processed flux directory, and point the basin's VICConfig at it
-    so subsequent ROUTING_ONLY rounds skip VIC entirely.
-    """
-    import shutil
-    cache_root = output_root / "cached_vic_runoff"
-    cache_root.mkdir(parents=True, exist_ok=True)
-    print("  >>> Caching VIC fluxes for ROUTING_ONLY phase...")
-
-    for w_cfg in worker_cfgs:
-        sid = w_cfg["subbasin_id"]
-        vic_cfg = vic_executor._vic_configs.get(sid)
-        if vic_cfg is None:
-            print(f"      {sid}: no VIC config, skipping cache")
-            continue
-
-        best_params = dict(centers.get(sid, {}))
-        if not best_params:
-            print(f"      {sid}: no best params, skipping cache")
-            continue
-
-        # Run VIC + routing with best params (this writes vic_for_routing/)
-        up_routing = _build_upstream_routing_info(sid, state, worker_cfgs)
-        up_soil = _build_upstream_soil_info(sid, state, worker_cfgs)
-        ok, _ = vic_executor.run(
-            subbasin_id=sid,
-            run_id=99999,
-            candidate_id=1,
-            params=best_params,
-            phase_tag="cache_vic_flux",
-            upstream_routing_info=up_routing,
-            upstream_soil_info=up_soil,
-        )
-        if not ok:
-            print(f"      {sid}: VIC cache run failed")
-            continue
-
-        src = Path(vic_cfg.base_output_dir) / f"{sid}_calibration_ai" / "current_run" / "vic_for_routing"
-        if not src.exists():
-            print(f"      {sid}: vic_for_routing not found at {src}")
-            continue
-
-        dst = cache_root / sid
-        if dst.exists():
-            shutil.rmtree(dst)
-        shutil.copytree(str(src), str(dst))
-        vic_cfg.vic_flux_source = str(dst)
-        print(f"      {sid}: cached → {dst}")
-
-
-def _clear_vic_flux_cache(vic_executor):
-    """Reset vic_flux_source so VIC runs again during JOINT phase."""
-    for sid, vic_cfg in vic_executor._vic_configs.items():
-        vic_cfg.vic_flux_source = ""
-    print("  >>> Cleared VIC flux cache for JOINT phase")
+# NOTE: _cache_vic_fluxes_for_routing / _clear_vic_flux_cache previously lived
+# here; they moved to scripts/executors/vic_routing.py as part of the
+# ModelExecutor refactor (2026-06-23). graph_nodes now calls
+# executor.cache_intermediates_for_routing / clear_intermediate_cache.
 
 
 # ---------------------------------------------------------------------------

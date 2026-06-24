@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI entry point for LangGraph-based MADR calibration.
+"""CLI entry point for LangGraph-based TRAv2 calibration.
 
 Replaces orchestrator.main() with LangGraph graph execution.
 Supports:
@@ -57,7 +57,7 @@ def load_team_config(path: str) -> dict:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="LangGraph-based MADR calibration orchestrator."
+        description="LangGraph-based TRAv2 calibration orchestrator."
     )
     p.add_argument(
         "--team-config", required=True,

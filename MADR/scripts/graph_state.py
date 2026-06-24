@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LangGraph state schema for MADR calibration.
+"""LangGraph state schema for TRAv2 calibration.
 
 Defines the CalibrationState TypedDict used as the graph's state,
 plus the merge_worker_results reducer for Send() fan-out.
@@ -58,9 +58,11 @@ class CalibrationState(TypedDict, total=False):
     team_config_path: str
     output_root: str
     mode: str                              # "simulate" or "real"
+    model_combination: str                 # "vic_routing" | "vic_cama_flood" | ...
     dry_run: bool
     param_ranges: Dict[str, Any]           # {param: (lo, hi)}
     objective_weights: Dict[str, float]
+    stop_rules: Dict[str, Any]
     worker_cfgs: List[Dict[str, Any]]
     upstream_map: Dict[str, List[str]]     # {basin: [upstream_basins]}
     full_upstream_map: Dict[str, List[str]]
@@ -125,7 +127,7 @@ class CalibrationState(TypedDict, total=False):
     exploration_results: Dict[str, Any]
     exploration_summary: str
 
-    # ── Escape states (kept for compat, disabled in MADR) ──
+    # ── Escape states (kept for compat, disabled in LW) ──
     escape_states: Dict[str, Dict]
 
     # ── Communication counters ──

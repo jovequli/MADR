@@ -817,3 +817,38 @@ def run_once(cfg: RuntimeConfig, run_id: int, params: Dict[str, float],
         log.write(f"Run {run_id} done: NSE={nse:.4f}, RMSE={rmse:.4f}, PBIAS={pbias:.2f}%\n")
 
     return True, metrics
+
+
+def run_vic_flux_only(cfg: RuntimeConfig, run_id: int, params: Dict[str, float],
+                      phase: str, log_path: str,
+                      upstream_soil_info: Optional[List[UpstreamSoilInfo]] = None,
+                      ) -> Tuple[bool, str]:
+    """Run VIC ONLY (no Lohmann routing) and return (ok, vic_result_dir).
+
+    Used by the vic_cama_flood combination, where CaMa-Flood replaces Lohmann
+    routing: we need the raw VIC grid fluxes but must NOT require a Lohmann
+    routing template (which these basins don't ship). This mirrors the VIC half
+    of run_once() up to — but not including — prepare_routing_dir(); run_once()
+    itself is left untouched so the vic_routing combination is unaffected.
+
+    Composite upstream-soil writing (the nested-basin lock) is preserved via
+    *upstream_soil_info*, identical to run_once().
+    """
+    current = cfg.current_dir
+    reset_dir(current)
+    vic_result = os.path.join(current, "vic_result")
+    ensure_dir(vic_result)
+
+    soil_path = os.path.join(current, "SOIL_PARAM_COMPLETE.txt")
+    write_soil_params(cfg.soil_base, soil_path, params,
+                      upstream_soil_infos=upstream_soil_info)
+
+    global_path = os.path.join(current, "global_param.txt")
+    write_global_param(cfg.global_base, global_path, soil_path, vic_result)
+
+    with open(log_path, "a", encoding="utf-8") as log:
+        log.write(f"VIC-flux-only run {run_id}: phase={phase}, params={params}\n")
+
+    if not run_vic_with_watchdog(cfg, run_id, global_path, log_path):
+        return False, ""
+    return True, vic_result

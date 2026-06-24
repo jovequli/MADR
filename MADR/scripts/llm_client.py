@@ -5,8 +5,6 @@ Supports multiple backends through OpenAI-compatible API format:
 - Anthropic Claude (via native SDK)
 - OpenAI / Codex
 - Google Gemini (via google-genai SDK)
-- DeepSeek — OpenAI-compatible
-- Grok (xAI) — OpenAI-compatible
 - Kimi (Moonshot) — OpenAI-compatible
 - Qwen (DashScope) — OpenAI-compatible
 - MiniMax — OpenAI-compatible
@@ -50,18 +48,14 @@ PROVIDER_DEFAULTS: Dict[str, Dict[str, str]] = {
         "api_key_env": "DASHSCOPE_API_KEY",
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     },
-    "deepseek": {
-        "api_key_env": "DEEPSEEK_API_KEY",
-        "base_url": "https://api.deepseek.com/v1",
-    },
-    "grok": {
-        "api_key_env": "GROK_API_KEY",
-        "base_url": "https://api.x.ai/v1",
-    },
     "minimax": {
         "api_key_env": "MINIMAX_API_KEY",
         "base_url": "https://api.minimaxi.com/anthropic",
         "sdk": "anthropic",
+    },
+    "deepseek": {
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "base_url": "https://api.deepseek.com/v1",
     },
 }
 
@@ -89,15 +83,6 @@ MODEL_PROVIDER_MAP: Dict[str, str] = {
     "gemini-2.5-pro": "gemini",
     "gemini-2.5-flash": "gemini",
     "gemini-2.5-flash-lite": "gemini",
-    # DeepSeek
-    "deepseek-v4-pro": "deepseek",
-    "deepseek-v4-flash": "deepseek",
-    "deepseek-chat": "deepseek",
-    "deepseek-reasoner": "deepseek",
-    # Grok
-    "grok-4.3": "grok",
-    "grok-3": "grok",
-    "grok-3-mini": "grok",
     # Kimi
     "kimi-k2.5": "kimi",
     "kimi-k2.6": "kimi",
@@ -110,6 +95,11 @@ MODEL_PROVIDER_MAP: Dict[str, str] = {
     "qwen-plus": "qwen",
     # MiniMax
     "MiniMax-M2.5": "minimax",
+    # DeepSeek
+    "deepseek-v4-pro": "deepseek",
+    "deepseek-v4-flash": "deepseek",
+    "deepseek-chat": "deepseek",
+    "deepseek-reasoner": "deepseek",
 }
 
 
@@ -128,12 +118,10 @@ def infer_provider(model: str) -> str:
         return "kimi"
     if "qwen" in low:
         return "qwen"
-    if "deepseek" in low:
-        return "deepseek"
-    if "grok" in low:
-        return "grok"
     if "minimax" in low:
         return "minimax"
+    if "deepseek" in low:
+        return "deepseek"
     raise ValueError(f"Cannot infer provider for model '{model}'. "
                      f"Specify provider explicitly or add to MODEL_PROVIDER_MAP.")
 
@@ -187,7 +175,7 @@ class LLMClient:
             config.provider = infer_provider(config.model)
         self.provider = config.provider
 
-        # Resolve API key
+        # Resolve API key (all providers in this API-only build need one).
         self._api_key = config.api_key
         if not self._api_key:
             env_var = config.api_key_env or PROVIDER_DEFAULTS.get(
@@ -365,7 +353,7 @@ class LLMClient:
             raw_response=resp,
         )
 
-    # ----- OpenAI-compatible -----
+    # ----- Claude CLI (local `claude` binary, no HTTP API) -----
 
     def _get_openai_client(self):
         if self._openai_client is None:
@@ -378,7 +366,9 @@ class LLMClient:
                 "base_url": self._base_url or None,
                 "timeout": self.config.timeout_sec,
             }
-            # Bypass system proxy for Chinese domestic APIs (kimi, qwen)
+            # Bypass system proxy for Chinese domestic APIs (kimi, qwen).
+            # If your network requires a proxy for these endpoints, remove
+            # this branch or override via OpenAI's http_client argument.
             if self.provider in ("kimi", "qwen"):
                 import httpx
                 kwargs["http_client"] = httpx.Client(proxy=None, timeout=self.config.timeout_sec)
@@ -394,12 +384,14 @@ class LLMClient:
             msgs.append({"role": "system", "content": system})
         msgs.extend(messages)
 
-        # Kimi K2.6 only supports temperature=1 and needs higher min tokens (thinking overhead)
+        # Kimi K2.6 only supports temperature=1 and needs higher min tokens
+        # (the model has reasoning-mode overhead before producing visible output).
         if "k2.6" in self.config.model:
             temperature = 1.0
             max_tokens = max(max_tokens, 1024)
 
-        # GPT-5.x and o-series require max_completion_tokens instead of max_tokens
+        # GPT-5.x and the o-series require max_completion_tokens (not
+        # max_tokens); they also do not accept temperature.
         model_low = self.config.model.lower()
         use_new_tokens = any(k in model_low for k in ["gpt-5", "o1", "o3", "o4"])
 
