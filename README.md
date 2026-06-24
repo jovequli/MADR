@@ -33,11 +33,11 @@ Global guidance and per-basin parameter proposals both draw on pretrained knowle
 - **Worker Agents** — N local-view agents, one per sub-basin. Each Worker is activated at the start of each round to translate the Leader's guidance for its basin into a concrete parameter proposal, using its own performance history and diagnostic signals as additional context.
 
 ```
-                                    ┌─→ Worker xixian    ─→ Model run
-                                    ├─→ Worker wangjiaba ─→ Model run
-Leader (per-round global diagnosis) ┼─→ Worker jiangjiaji ─→ Model run
-                                    ├─→ Worker zhoukou   ─→ Model run
-                                    └─→ Worker bengbu    ─→ Model run
+                                    ┌─→ Worker 1            ─→ Model run
+                                    ├─→ Worker 2            ─→ Model run
+Leader (per-round global diagnosis) ┼─→ Worker 3            ─→ Model run
+                                    ├─→ ...                 ─→ Model run
+                                    └─→ Worker N (outlet)   ─→ Model run
 ```
 
 A complete round proceeds through four steps:
@@ -53,35 +53,25 @@ Three coordination mechanisms keep the Workers consistent: **topological process
 
 ## Calibration strategy
 
-MADR runs an **Exploration Stage** followed by **sequential Agent Phases**. Each phase ends as soon as either condition fires:
+MADR runs an **Exploration Stage** followed by one or more **sequential Agent Phases**. The number and content of phases are defined by the model combination — each combination ships its own phase pipeline, chosen so that successive phases isolate a tractable parameter subspace. Every phase ends as soon as either of two conditions fires:
 
 1. **Patience-based early termination** (recommended) — the in-phase mean sub-basin NSE has not improved for `patience_rounds` consecutive **single-candidate** rounds. Multi-candidate rounds are excluded from the counter so aggressive exploration does not trip the trigger.
 2. **`max_rounds` cap** — a hard upper bound that always applies, providing a safety ceiling on per-phase cost.
 
-This adaptive behavior is the headline of the current build: each phase stops as soon as it plateaus instead of always running to its full round budget. The paper's reported runs can still be reproduced exactly (see *Reproducing the paper's fixed-budget runs* below).
+This adaptive behavior is the headline of the current build: each phase stops as soon as it plateaus, rather than always running to its full round budget.
 
-- **Exploration Stage** (before Agent Rounds): 50 simulations per sub-basin (10 Gaussian perturbations around the configured default + 40 Latin Hypercube samples). The per-sub-basin summary (best NSE, top-five NSE, best parameter combination) is injected into every Worker's prompt as a fixed contextual reference and shown to the Leader once at Round 1. The exploration is **soft contextual evidence** to the LLMs; it does not modify the initial parameter center or the search radius.
-- **Multi-candidate generation** (early rounds of the VIC-Only and Routing-Only phases): every Worker is invoked three times with strategy tags `conservative` / `moderate` / `bold`; the candidate with the highest NSE is adopted as that round's proposal.
+- **Exploration Stage** (before any Agent Rounds): a configurable number of simulations per sub-basin, drawn as a mix of Gaussian perturbations around the configured default and Latin Hypercube samples across the feasible range. The per-sub-basin summary (best NSE, top NSE values, best parameter combination) is injected into every Worker's prompt as fixed contextual reference and shown to the Leader once at Round 1. The exploration is **soft contextual evidence** to the LLMs; it does not modify the initial parameter center or the search radius.
+- **Multi-candidate generation** (early rounds of selected phases): every Worker is invoked three times with strategy tags `conservative` / `moderate` / `bold`; the candidate with the highest NSE is adopted as that round's proposal.
 - **Round 1 special case**: the Worker LLM is not invoked. The model runs with the configured default parameters, providing the baseline against which the Leader's first guidance is issued.
 - **Final round (force-best)**: after the last phase ends — whether by patience or by `max_rounds` — MADR runs one mandatory final round in which each Worker uses its own per-sub-basin best historical parameters, delivering a clean end-state composite.
 
-Recommended pipeline for the VIC + Lohmann combination (patience enabled):
+A phase entry in the pipeline looks like this (generic shape — see the Case Study below for a concrete instantiation):
 
 ```jsonc
-"phase_config": {
-  "pipeline": [
-    {"name": "VIC_ONLY",     "max_rounds": 50, "mc_rounds": 11, "mc_candidates": 3, "patience_rounds": 10},
-    {"name": "ROUTING_ONLY", "max_rounds": 30, "mc_rounds":  5, "mc_candidates": 3, "patience_rounds":  5},
-    {"name": "JOINT",        "max_rounds": 10, "mc_rounds":  0, "mc_candidates": 0, "patience_rounds":  3}
-  ]
-}
+{"name": "PHASE_NAME", "max_rounds": M, "mc_rounds": K, "mc_candidates": 3, "patience_rounds": P}
 ```
 
-**Evaluation budget per sub-basin.** With patience enabled, a typical MADR run converges in roughly **110–150 evaluations per sub-basin**. With patience disabled, the budget is the fixed **170 evaluations** used in the paper.
-
-#### Reproducing the paper's fixed-budget runs
-
-The paper's reported numbers use the legacy fixed-budget configuration: each phase runs to its full `max_rounds` regardless of plateau, giving exactly **170 evaluations per sub-basin** (50 Exploration + 120 across 90 Agent Rounds = 75 single-candidate × 1 + 15 multi-candidate × 3). To reproduce, omit `patience_rounds` from every phase (or set it to `999` to disable the trigger).
+`mc_rounds` says how many of the first K rounds of that phase use the multi-candidate mechanism; `patience_rounds` is optional (omit, or set to `999`, to disable early termination and force the full `max_rounds`).
 
 ---
 
@@ -145,6 +135,20 @@ This VIC + Lohmann case is the canonical example of how the LangGraph workflow d
 - **Per-basin budget**: 170 model evaluations (50 Exploration + 120 Agent Rounds)
 - **LLMs tested**: Claude Sonnet 4.6, Gemini 3 Flash Preview
 - **Result**: MADR reaches the optimization benchmarks' accuracy at less than 5% of their 4,000-evaluation budget, with smaller validation-period NSE drops than either benchmark.
+
+**Recommended phase pipeline** for this case (patience enabled):
+
+```jsonc
+"phase_config": {
+  "pipeline": [
+    {"name": "VIC_ONLY",     "max_rounds": 50, "mc_rounds": 11, "mc_candidates": 3, "patience_rounds": 10},
+    {"name": "ROUTING_ONLY", "max_rounds": 30, "mc_rounds":  5, "mc_candidates": 3, "patience_rounds":  5},
+    {"name": "JOINT",        "max_rounds": 10, "mc_rounds":  0, "mc_candidates": 0, "patience_rounds":  3}
+  ]
+}
+```
+
+With patience enabled, this typically converges in ~110–150 evaluations per sub-basin. **To reproduce the paper's fixed-budget runs exactly**, omit `patience_rounds` (or set it to `999`); each phase then runs to its full `max_rounds`, giving exactly 170 evaluations per sub-basin (50 Exploration + 75 single-candidate × 1 + 15 multi-candidate × 3).
 
 The full dataset (observations + VIC/Lohmann inputs + 10 × MADR runs × 2 LLMs + SCE-UA and NSGA-III outputs) is in the Zenodo record above.
 
