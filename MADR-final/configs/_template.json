@@ -1,0 +1,104 @@
+{
+  "_comment": "MADR config TEMPLATE — annotated reference showing every top-level field. Copy and adapt for your own runs. Comments here document what each field does.",
+  "_path_replacement_notice": "All absolute paths in this config (vic_exe, rout_exe, swatplus_exe, and each worker's obs_file/soil_base/global_base/rout_template_dir/etc.) are placeholders from the author's local setup. REPLACE them with your own local paths before running.",
+  "run_name": "your_run_name_here",
+  "model_combination": "vic_routing",
+  "_doc_model_combination": "Selects executor + prompts/. One of: vic_routing | vic_cama_flood | swat. Defaults to vic_routing for backward compatibility.",
+  "max_rounds": 0,
+  "_doc_max_rounds": "0 = derive from sum of per-phase max_rounds. >0 = override global cap.",
+  "candidates_per_worker": 1,
+  "max_parallel_workers": 3,
+  "simulation_period": {
+    "start_year": 1980,
+    "end_year": 1990
+  },
+  "model_binding": {
+    "mode": "real"
+  },
+  "_doc_model_binding": "mode: real | simulate (simulate skips the heavy binaries for plumbing tests).",
+  "outlet_subbasin_id": "outlet",
+  "vic_exe": "/path/to/vic_classic.exe",
+  "rout_exe": "/path/to/lohmann/rout",
+  "_doc_executables": "Only the ones your model_combination needs. SWAT+ uses swatplus_exe; CaMa-Flood adds cama_flood_exe; VIC+routing uses vic_exe + rout_exe.",
+  "objective_weights": {
+    "mean_nse": 0.9,
+    "consistency": 0.1
+  },
+  "phase_config": {
+    "_doc": "Per-phase max_rounds (hard cap) and patience_rounds (early termination when in-phase mean NSE plateaus for N consecutive single-candidate rounds). Omit patience_rounds (or set to 999) to disable early termination and reproduce the paper's fixed-budget runs.",
+    "pipeline": [
+      {
+        "name": "VIC_ONLY",
+        "max_rounds": 50,
+        "mc_rounds": 11,
+        "mc_candidates": 3,
+        "patience_rounds": 10
+      },
+      {
+        "name": "ROUTING_ONLY",
+        "max_rounds": 30,
+        "mc_rounds": 5,
+        "mc_candidates": 3,
+        "patience_rounds": 5
+      },
+      {
+        "name": "JOINT",
+        "max_rounds": 10,
+        "mc_rounds": 0,
+        "mc_candidates": 0,
+        "patience_rounds": 3
+      }
+    ]
+  },
+  "param_ranges": {
+    "_doc": "Tunable parameter ranges. Names and count depend on model_combination.",
+    "binfilt": [
+      0.001,
+      0.4
+    ]
+  },
+  "initial_param_center": {
+    "binfilt": 0.2
+  },
+  "initial_radius": {
+    "binfilt": 0.05
+  },
+  "initial_exploration": {
+    "_doc": "50-sample initial exploration (10 Gaussian + 40 LHS) — provides soft contextual evidence to LLM agents. enabled=false to skip.",
+    "enabled": true,
+    "n_near": 10,
+    "n_random": 40
+  },
+  "leader": {
+    "_doc": "Leader LLM config. Provider auto-inferred from model name if not set.",
+    "agent_id": "leader_outlet",
+    "model": "claude-sonnet-4-6",
+    "provider": "anthropic",
+    "temperature": 0.3,
+    "max_tokens": 8192,
+    "api_key_env": "ANTHROPIC_API_KEY",
+    "timeout_sec": 240.0
+  },
+  "workers": [
+    {
+      "_doc": "One Worker per sub-basin. Topology defined by neighbors_downstream.",
+      "agent_id": "worker_outlet",
+      "subbasin_id": "outlet",
+      "station_code": "OUT",
+      "model": "claude-sonnet-4-6",
+      "provider": "anthropic",
+      "temperature": 0.4,
+      "max_tokens": 8192,
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "timeout_sec": 60.0,
+      "memory_window": 5,
+      "obs_file": "/path/to/observed_streamflow.txt",
+      "neighbors_downstream": [],
+      "is_outlet": true,
+      "soil_base": "/path/to/SOIL_PARAM_COMPLETE.txt",
+      "global_base": "/path/to/global_param.txt",
+      "rout_template_dir": "/path/to/routing_param/",
+      "rout_exe": "/path/to/lohmann/rout"
+    }
+  ]
+}

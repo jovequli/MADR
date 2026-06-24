@@ -2,12 +2,20 @@
 
 MADR is an LLM-driven framework for calibrating distributed hydrological models in nested-basin systems. A **Leader Agent** diagnoses cross-station simulation errors and produces structured direction-and-magnitude guidance; per-basin **Worker Agents** translate that guidance into concrete parameter sets. MADR is implemented in [LangGraph](https://github.com/langchain-ai/langgraph) and is evaluated against SCE-UA, NSGA-III, and a single-agent ablation (**SADR**) on the [VIC 5.1.0](https://vic.readthedocs.io/) model coupled with the Lohmann routing model in the Huai River Basin.
 
-This repository contains two architectures:
+📦 **Preprint**: Zhao et al. (2026). *LLM-Driven Diagnostic Reasoning for Distributed Hydrological Model Calibration*. Research Square. [10.21203/rs.3.rs-10106384/v1](https://doi.org/10.21203/rs.3.rs-10106384/v1)
+📂 **Dataset**: companion data (inputs, all 46 calibration runs, two benchmark methods) on Zenodo: [10.5281/zenodo.20622937](https://doi.org/10.5281/zenodo.20622937)
 
-- **`MADR/`** — Multi-Agent Diagnostic Reasoning. Leader LLM **and** per-basin Worker LLMs.
-- **`SADR/`** — Single-Agent Diagnostic Reasoning ablation. The Leader LLM is retained, but the LLM-based Worker is replaced by a deterministic, rule-based code executor, so LLM-driven reasoning occurs only at the Leader level.
+## What's in this repository
 
-📦 **Data**: companion dataset (inputs, all 46 calibration runs, two benchmark methods) is on Zenodo: [10.5281/zenodo.20622937](https://doi.org/10.5281/zenodo.20622937)
+| Folder | Purpose | Scope |
+|---|---|---|
+| **[`MADR/`](MADR/)** | Original single-model MADR build used in the paper. Leader + per-basin Worker LLMs. | VIC + Lohmann routing only (paper-reproducible) |
+| **[`SADR/`](SADR/)** | Single-Agent Diagnostic Reasoning ablation control. Leader LLM is retained but the Worker is a deterministic rule-based executor. **Used as ablation only — not recommended for real applications; not extended to other models.** | VIC + Lohmann routing only |
+| **[`MADR-final/`](MADR-final/)** | Multi-model MADR — pluggable executor architecture supporting `vic_routing`, `vic_cama_flood`, and `swat` combinations. **Recommended for new work.** | VIC + Lohmann, VIC + CaMa-Flood, SWAT+ (extensible) |
+| **[`routing/`](routing/)** | Lohmann routing model Fortran source (with this study's local modifications + Makefile) | — |
+| **[`docs/`](docs/)** | Provider-config reference (Anthropic, OpenAI, Gemini, DeepSeek, Kimi, Qwen, MiniMax) | — |
+
+For new work, start with **`MADR-final/`** — it's the actively maintained framework. The `MADR/` + `SADR/` folders are preserved as the exact code used to produce the paper's numbers.
 
 ---
 

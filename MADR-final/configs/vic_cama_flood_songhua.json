@@ -1,0 +1,191 @@
+{
+  "_comment": "MADR — VIC + CaMa-Flood example (Songhua River nested pair: Jiangqiao upstream → Jiamusi outlet). Real-mode pipeline: VIC produces grid fluxes → NetCDF conversion → CaMa-Flood with calibrated channel parameters → metrics at outlet. Exercises topological ordering and per-reach channel-param locking.",
+  "_path_replacement_notice": "All absolute paths in this config (vic_exe, rout_exe, swatplus_exe, and each worker's obs_file/soil_base/global_base/rout_template_dir/etc.) are placeholders from the author's local setup. REPLACE them with your own local paths before running.",
+  "run_name": "songhua_nested_real",
+  "max_rounds": 0,
+  "candidates_per_worker": 1,
+  "max_parallel_workers": 2,
+  "simulation_period": {
+    "start_year": 2000,
+    "end_year": 2024
+  },
+  "model_binding": {
+    "mode": "real"
+  },
+  "model_combination": "vic_cama_flood",
+  "outlet_subbasin_id": "jms",
+  "vic_exe": "/home/yc/桌面/cc/MADR/test/vic_cama_pkg_2000-2024/models/VIC-5.1.0/vic/drivers/classic/vic_classic.exe",
+  "objective_weights": {
+    "mean_nse": 0.9,
+    "consistency": 0.1
+  },
+  "stop_rules": {
+    "outlet_nse_target": 0.85,
+    "min_improvement": 0.003,
+    "patience_rounds": 5
+  },
+  "phase_config": {
+    "pipeline": [
+      {
+        "name": "VIC_ONLY",
+        "max_rounds": 1,
+        "mc_rounds": 0,
+        "mc_candidates": 0,
+        "patience_rounds": 999
+      }
+    ]
+  },
+  "param_ranges": {
+    "binfilt": [
+      0.001,
+      0.4
+    ],
+    "Ds": [
+      0.0001,
+      1.0
+    ],
+    "Dsmax": [
+      1.0,
+      30.0
+    ],
+    "Ws": [
+      0.5,
+      1.0
+    ],
+    "soil_d2": [
+      0.1,
+      2.0
+    ],
+    "soil_d3": [
+      0.5,
+      2.0
+    ],
+    "Hc": [
+      0.01,
+      1.0
+    ],
+    "Hmin": [
+      0.5,
+      2.0
+    ],
+    "Wc": [
+      0.1,
+      4.0
+    ],
+    "Wmin": [
+      1.0,
+      10.0
+    ]
+  },
+  "initial_param_center": {
+    "binfilt": 0.2,
+    "Ds": 0.01,
+    "Dsmax": 10.0,
+    "Ws": 0.7,
+    "soil_d2": 0.3,
+    "soil_d3": 1.5,
+    "Hc": 0.1,
+    "Hmin": 1.0,
+    "Wc": 2.5,
+    "Wmin": 5.0
+  },
+  "initial_radius": {
+    "binfilt": 0.05,
+    "Ds": 0.05,
+    "Dsmax": 5.0,
+    "Ws": 0.1,
+    "soil_d2": 0.2,
+    "soil_d3": 0.3,
+    "Hc": 0.1,
+    "Hmin": 0.3,
+    "Wc": 0.5,
+    "Wmin": 2.0
+  },
+  "leader": {
+    "agent_id": "leader_songhua",
+    "model": "claude-sonnet-4-6",
+    "provider": "anthropic",
+    "temperature": 0.3,
+    "max_tokens": 8192,
+    "api_key_env": "ANTHROPIC_API_KEY",
+    "timeout_sec": 600.0
+  },
+  "workers": [
+    {
+      "agent_id": "worker_jq",
+      "subbasin_id": "jq",
+      "station_code": "JQ",
+      "model": "claude-sonnet-4-6",
+      "provider": "anthropic",
+      "temperature": 0.4,
+      "max_tokens": 8192,
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "timeout_sec": 600.0,
+      "memory_window": 5,
+      "is_outlet": false,
+      "neighbors_downstream": [
+        "jms"
+      ],
+      "obs_file": "/home/yc/桌面/cc/MADR/test/outputs/obs/jq_obs.csv",
+      "soil_base": "/home/yc/桌面/cc/MADR/test/vic_cama_pkg_2000-2024/basins/Songhua/J.Q_2000-2024_025deg/vic_temp/soil/SOIL_PARAM_COMPLETE.txt",
+      "global_base": "/home/yc/桌面/cc/MADR/test/vic_cama_pkg_2000-2024/basins/Songhua/J.Q_2000-2024_025deg/vic_temp/global_param_J.Q_2000-2024_025deg.txt",
+      "cama_flood_config": {
+        "cmf_pkg_dir": "/home/yc/桌面/cc/MADR/test/vic_cama_pkg_2000-2024/models/cmf_v420_pkg",
+        "basin_map": "J.Q_15min",
+        "diminfo": "diminfo_J.Q_025deg.txt",
+        "forcing_dir": "/home/yc/桌面/cc/MADR/test/outputs/cama_forcing/jq",
+        "forcing_var": "Runoff",
+        "forcing_prefix": "jq_runoff_1d",
+        "outlet": {
+          "ix": 13,
+          "iy": 19
+        },
+        "obs_file": "/home/yc/桌面/cc/MADR/test/outputs/obs/jq_obs.csv",
+        "start_year": 2001,
+        "end_year": 2024,
+        "manning_river": 0.03,
+        "manning_floodplain": 0.1,
+        "omp_threads": 8
+      }
+    },
+    {
+      "agent_id": "worker_jms",
+      "subbasin_id": "jms",
+      "station_code": "JMS",
+      "model": "claude-sonnet-4-6",
+      "provider": "anthropic",
+      "temperature": 0.4,
+      "max_tokens": 8192,
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "timeout_sec": 600.0,
+      "memory_window": 5,
+      "is_outlet": true,
+      "neighbors_downstream": [],
+      "obs_file": "/home/yc/桌面/cc/MADR/test/outputs/obs/jms_obs.csv",
+      "soil_base": "/home/yc/桌面/cc/MADR/test/vic_cama_pkg_2000-2024/basins/Songhua/J.M.S_2000-2024_025deg/vic_temp/soil/SOIL_PARAM_COMPLETE.txt",
+      "global_base": "/home/yc/桌面/cc/MADR/test/vic_cama_pkg_2000-2024/basins/Songhua/J.M.S_2000-2024_025deg/vic_temp/global_param_J.M.S_2000-2024_025deg.txt",
+      "cama_flood_config": {
+        "cmf_pkg_dir": "/home/yc/桌面/cc/MADR/test/vic_cama_pkg_2000-2024/models/cmf_v420_pkg",
+        "basin_map": "J.M.S_15min",
+        "diminfo": "diminfo_J.M.S_025deg.txt",
+        "forcing_dir": "/home/yc/桌面/cc/MADR/test/outputs/cama_forcing/jms",
+        "forcing_var": "Runoff",
+        "forcing_prefix": "jms_runoff_1d",
+        "outlet": {
+          "ix": 42,
+          "iy": 20
+        },
+        "obs_file": "/home/yc/桌面/cc/MADR/test/outputs/obs/jms_obs.csv",
+        "start_year": 2001,
+        "end_year": 2024,
+        "manning_river": 0.03,
+        "manning_floodplain": 0.1,
+        "omp_threads": 8
+      }
+    }
+  ],
+  "initial_exploration": {
+    "enabled": false,
+    "seed_from_run": ""
+  }
+}
