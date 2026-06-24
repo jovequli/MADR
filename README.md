@@ -250,3 +250,11 @@ If you use this code, please cite the preprint:
 ### Companion dataset
 
 > Zhao, Y. (2026). Dataset for "LLM-Driven Diagnostic Reasoning for Distributed Hydrological Model Calibration". Zenodo. https://doi.org/10.5281/zenodo.20622937
+
+---
+
+## License
+
+The MADR framework (this repository, excluding `routing/`) is released under the **MIT License** — see [LICENSE](LICENSE).
+
+The Fortran code in [`routing/`](routing/) is the Lohmann routing model originally distributed by the University of Washington VIC group. It has circulated freely in the research community for many years without a formal license; we include it here with the local modifications documented in [`routing/README.md`](routing/README.md) so the calibration experiments are end-to-end reproducible. Treat that subtree as governed by its upstream provenance, not by the repository-level MIT license.
