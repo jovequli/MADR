@@ -124,17 +124,12 @@ For multi-agent (MADR) runs, repeat the same swap in every `workers[]` entry. Fo
 
 The paper validates MADR on the catchment upstream of the Bengbu gauging station in the Huai River basin (121,330 km²), with **five nested control stations**: Xixian (XX) → Wangjiaba (WJB) → Bengbu (BB) on the main stem, with Zhoukou (ZK) and Jiangjiaji (JJJ) on tributaries entering between WJB and BB. The example config `MADR/configs/vic_routing_bengbu.json` reproduces this setup.
 
-This VIC + Lohmann case is the canonical example of how the LangGraph workflow drives a calibration run: the Exploration Stage seeds the LLMs' context, then the three Agent Phases (VIC_ONLY → ROUTING_ONLY → JOINT) cycle through prepare-batch / execute-workers / collect-results / diagnostics / Leader review until each phase plateaus or hits its cap, and finally a force-best round writes the best-historical parameter set. The diagram below shows every node in the LangGraph; MADR-specific nodes (multi-candidate evaluation with strategy tags) are in purple, SADR-specific nodes (rule-based candidate generation) are in red, and shared nodes are in green.
-
-![MADR LangGraph node-level workflow (vic_routing example)](MADR/docs/langgraph_workflow.png)
-
 **Run summary:**
 
 - **Calibration period**: 1981–1990 (1980 spin-up)
 - **Validation period**: 1991–1996 (independent transferability test)
 - **Per-basin budget**: 170 model evaluations (50 Exploration + 120 Agent Rounds)
 - **LLMs tested**: Claude Sonnet 4.6, Gemini 3 Flash Preview
-- **Result**: MADR reaches the optimization benchmarks' accuracy at less than 5% of their 4,000-evaluation budget, with smaller validation-period NSE drops than either benchmark.
 
 **Recommended phase pipeline** for this case (patience enabled):
 
@@ -149,6 +144,21 @@ This VIC + Lohmann case is the canonical example of how the LangGraph workflow d
 ```
 
 With patience enabled, this typically converges in ~110–150 evaluations per sub-basin. **To reproduce the paper's fixed-budget runs exactly**, omit `patience_rounds` (or set it to `999`); each phase then runs to its full `max_rounds`, giving exactly 170 evaluations per sub-basin (50 Exploration + 75 single-candidate × 1 + 15 multi-candidate × 3).
+
+### Results
+
+![Convergence curves and cost breakdown for MADR (Gemini and Claude) vs. SCE-UA and NSGA-III across the five sub-basins and the basin average, plus wall-clock and token consumption](MADR/docs/convergence.png)
+
+Within its 170-evaluation budget, MADR (Gemini 0.744, Claude 0.760 basin-average NSE) approaches the accuracy that SCE-UA (0.764) and NSGA-III (0.772) achieve only after their full 4,000-evaluation budget — about 23–36× less single-core wall-clock time at ~2.15 M tokens per run. Table 6 shows how many evaluations the conventional algorithms need at the station level to match MADR's final NSE; "—" indicates the threshold was never reached within the 4,000-evaluation budget.
+
+**Table 6.** Number of evaluations the conventional algorithms need to reach MADR's best NSE.
+
+| LLM Source | Algorithm | XX | WJB | JJJ | ZK | BB |
+|---|---|---:|---:|---:|---:|---:|
+| Gemini | NSGA-III | 1808 | 3004 | 2039 | 252 | 3004 |
+| Gemini | SCE-UA | 1745 | 3081 | — | 658 | — |
+| Claude | NSGA-III | 1808 | — | 1950 | 3051 | 475 |
+| Claude | SCE-UA | 1745 | 3165 | 3037 | 2069 | — |
 
 The full dataset (observations + VIC/Lohmann inputs + 10 × MADR runs × 2 LLMs + SCE-UA and NSGA-III outputs) is in the Zenodo record above.
 
