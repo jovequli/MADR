@@ -80,12 +80,15 @@ def simulate_metrics(
 
     # Optimum-anchored NSE response. Centers are reasonable for Huaihe.
     nse = 0.55
-    nse += 0.08 * (1.0 - abs(params.get("cn2", 75.0) - 75.0) / 50.0)
+    # cn2 is a PERCENT CHANGE (pctchg, range [-25, 25], default 0); optimum
+    # at a small positive offset, degrading smoothly toward both bounds.
+    nse += 0.08 * (1.0 - abs(params.get("cn2", 0.0) - 5.0) / 30.0)
     nse += 0.05 * (1.0 - abs(params.get("esco", 0.95) - 0.95))
     nse += 0.04 * (1.0 - abs(params.get("awc", 0.0) - 0.0) / 50.0)
     nse += 0.04 * (1.0 - abs(params.get("surlag", 4.0) - 4.0) / 12.0)
-    nse += 0.03 * (1.0 - abs(params.get("alpha_bf", 0.048) - 0.05) / 1.0)
-    nse += 0.03 * (1.0 - abs(params.get("gw_delay", 31.0) - 30.0) / 250.0)
+    nse += 0.03 * (1.0 - abs(params.get("alpha", 0.05) - 0.05) / 1.0)
+    nse += 0.03 * (1.0 - abs(params.get("flo_min", 3.0) - 3.0) / 20.0)
+    nse += 0.02 * (1.0 - abs(params.get("deep_seep", 0.05) - 0.05) / 0.4)
     nse += _seeded_noise(seed + "-nse", -0.03, 0.03)
     nse = clamp(nse, -0.2, 0.95)
 

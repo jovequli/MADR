@@ -92,6 +92,12 @@ class VICConfig:
     end_year: int = 1980
     flux_prefix: str = "huaihe_fluxes_"
     vic_flux_source: str = ""  # Pre-existing flux dir for routing-only mode
+    spin_up_years: int = 0  # Warm-up years simulated before start_year, excluded from metrics
+    # Explicit evaluation window (evaluation_period). When set, the simulation
+    # runs exactly start_year..end_year, metrics use only this window, and
+    # spin_up_years is ignored.
+    eval_start_year: Optional[int] = None
+    eval_end_year: Optional[int] = None
 
     def validate(self) -> List[str]:
         """Check that required paths exist."""
@@ -135,6 +141,11 @@ def run_vic_real(
             start_year=int(vic_config.start_year),
             end_year=int(vic_config.end_year),
             flux_prefix=vic_config.flux_prefix,
+            spin_up_years=int(vic_config.spin_up_years),
+            eval_start_year=(int(vic_config.eval_start_year)
+                             if vic_config.eval_start_year is not None else None),
+            eval_end_year=(int(vic_config.eval_end_year)
+                           if vic_config.eval_end_year is not None else None),
         )
         routing_params = {
             "velocity": params.get("velocity", 1.5),

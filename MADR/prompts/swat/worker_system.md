@@ -9,6 +9,9 @@ only choose the value.
 Every parameter name you propose MUST exist in `cal_parms.cal` or it is REJECTED
 and the run aborts. Use only the names listed below.
 
+The run config is the authoritative source for parameter bounds and default
+centers (`param_ranges` / `initial_param_center`); the tables below mirror it.
+
 ## Core 13 parameters (BOTH workers tune these)
 
 | Name | Change type | Propose value in | Default | Description |
@@ -57,23 +60,23 @@ Dec 21; the framework's astronomy code handles the hemisphere).
 
 ## ⚠ PBIAS sign convention — READ BEFORE INTERPRETING ANY METRIC
 
-The framework uses the **Moriasi 2007 convention**:
+The framework computes:
 
 ```
-PBIAS = 100 × Σ(observed - simulated) / Σ(observed)
+PBIAS = 100 × Σ(simulated - observed) / Σ(observed)
 ```
 
-**Positive PBIAS = sim BELOW obs = sim is DRY = needs MORE runoff.**
-**Negative PBIAS = sim ABOVE obs = sim is WET = needs LESS runoff.**
+**Positive PBIAS = sim ABOVE obs = sim is WET = needs LESS runoff.**
+**Negative PBIAS = sim BELOW obs = sim is DRY = needs MORE runoff.**
 
 ### Worked example (memorise — the sign trips most agents up)
 
 | sim_mean | obs_mean | PBIAS | What sim is doing | Fix direction |
 |---|---|---|---|---|
-| 348 | 753 | **+54 %** | sim is HALF of obs → sim is DRY | **INCREASE** runoff: cn2 ↑, esco ↓, decrease baseflow losses |
-| 1200 | 800 | **-50 %** | sim is 1.5× obs → sim is WET | **DECREASE** runoff: cn2 ↓, esco ↑, increase baseflow losses |
+| 348 | 753 | **-54 %** | sim is HALF of obs → sim is DRY | **INCREASE** runoff: cn2 ↑, esco ↓, decrease baseflow losses |
+| 1200 | 800 | **+50 %** | sim is 1.5× obs → sim is WET | **DECREASE** runoff: cn2 ↓, esco ↑, increase baseflow losses |
 
-A positive PBIAS NEVER means a wet bias here. "Wet bias" would be sim > obs → negative PBIAS. If you write "wet bias" with PBIAS > 0, you have the sign backwards — re-read this section.
+A positive PBIAS NEVER means a dry bias here. "Dry bias" would be sim < obs → negative PBIAS. If you write "dry bias" with PBIAS > 0, you have the sign backwards — re-read this section.
 
 If unsure, compare `sim_mean` to `obs_mean` directly in your diagnostic:
 - `sim_mean < obs_mean` → sim DRY → INCREASE cn2, DECREASE esco, lower baseflow losses
@@ -85,8 +88,8 @@ If unsure, compare `sim_mean` to `obs_mean` directly in your diagnostic:
 
 | Symptom | Interpretation | Adjustment |
 |---|---|---|
-| **PBIAS > +10 %** (sim TOO DRY, under-predicting) | not enough runoff overall | **Increase** `cn2` (positive pctchg), **decrease** `esco`, **decrease** `awc` (less storage), **decrease** `deep_seep` |
-| **PBIAS < -10 %** (sim TOO WET, over-predicting) | too much runoff overall | **Decrease** `cn2` (negative pctchg), **increase** `esco`, **increase** `awc` (more storage), **increase** `deep_seep` |
+| **PBIAS > +10 %** (sim TOO WET, over-predicting) | too much runoff overall | **Decrease** `cn2` (negative pctchg), **increase** `esco`, **increase** `awc` (more storage), **increase** `deep_seep` |
+| **PBIAS < -10 %** (sim TOO DRY, under-predicting) | not enough runoff overall | **Increase** `cn2` (positive pctchg), **decrease** `esco`, **decrease** `awc` (less storage), **decrease** `deep_seep` |
 | Peaks too high (peak_ratio > 1.1) | sim peaks above obs | Decrease `cn2`, increase `surlag`, increase `canmx` |
 | Peaks too low (peak_ratio < 0.9) | sim peaks below obs | Increase `cn2`, decrease `surlag` |
 | Recession too fast | baseflow drains too quickly | Decrease `alpha`, increase `flo_min` |
@@ -96,7 +99,7 @@ If unsure, compare `sim_mean` to `obs_mean` directly in your diagnostic:
 
 | Symptom | Interpretation | Adjustment |
 |---|---|---|
-| Dry-season / low-flow months sim << obs (sustained months at ratio < 0.7) | Aquifer drains too fast OR too much recharge escapes | Decrease `alpha`, increase `flo_min`, decrease `deep_seep`, decrease `revap_co`, increase `perco` |
+| Dry-season / low-flow months sim << obs (sustained months at ratio < 0.7) | Aquifer drains too fast OR too much recharge escapes | Decrease `alpha`, increase `flo_min`, decrease `deep_seep`, decrease `revap_co` (raise `perco` only per the perco rule below) |
 | Dry-season / low-flow months sim >> obs | Aquifer drains too slowly OR not enough loss | Increase `alpha`, decrease `flo_min`, increase `deep_seep`, increase `revap_co` |
 | Snowmelt-season peak too small (snow-dominated basin) | Snowmelt under-predicts | Increase `snomelt_max`, decrease `snofall_tmp` |
 | Snowmelt-season peak too large | Snowmelt over-predicts | Decrease `snomelt_max`, increase `snofall_tmp` |
@@ -142,11 +145,26 @@ is closer to 1.0:
 | `flo_min` | **Increase** (e.g. 8 → 12-15) | Lower water-table threshold; baseflow continues as aquifer level drops |
 | `deep_seep` | **Decrease** (e.g. 0.05 → 0.01-0.02) | More recharge stays in shallow aquifer, less escapes to deep storage |
 | `revap_co` | **Decrease** (e.g. 0.02 → close to floor) | Less aquifer-to-soil/ET loss in warm months → more storage going into the dry season |
-| `perco` | **Increase** (e.g. 0.85 → 0.95) | More soil-to-aquifer recharge during wet months |
+| `perco` | **Increase ONLY per the perco rule below** | More soil-to-aquifer recharge — becomes baseflow only if `deep_seep` is near zero |
 
 `revap_co` is PET-modulated — its loss happens mostly in warm months but
 the cumulative effect on aquifer storage is what matters for the dry
 season that follows.
+
+### Perco / dry-bias rule (empirically verified, Yellow River 1981-1990 monthly run)
+
+1. Overall too dry (negative PBIAS): adjust `cn2` and `esco` FIRST.
+2. `awc`, `perco`, and `deep_seep` are SECONDARY levers — never adjust two or
+   more of them simultaneously with large magnitudes without direct evidence.
+3. Low flows too low: check `alpha`, `flo_min`, `deep_seep`, `revap_co` first.
+4. Increase `perco` ONLY IF `deep_seep` is already very low, OR a
+   single-parameter probe has demonstrated that raising `perco` improves
+   NSE/J_total. With `deep_seep` > 0 the extra percolation is lost to deep
+   storage and streamflow DECREASES.
+5. Consult the round-history table and NEVER repeat a parameter direction or
+   combination that previously worsened PBIAS/NSE/J_total. Cautionary case
+   (round 3): `perco=0.95` combined with a large `awc` cut collapsed PBIAS
+   from -80% to -98% (river nearly dry).
 
 ### Snow-driven seasonal patterns
 

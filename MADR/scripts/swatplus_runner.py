@@ -471,6 +471,56 @@ def ensure_calibration_enabled(txtinout_dir: Path) -> None:
         logger.info("Patched chg line in %s/file.cio", txtinout_dir)
 
 
+def _extend_time_sim(txtinout_dir: Path, spin_up_years: int,
+                     target_start_year: int) -> None:
+    """Extend the working copy's time.sim start year backward for warm-up.
+
+    Only called when graph_nodes attaches spin_up_years to the run config
+    (universal spin_up_years without evaluation_period); legacy runs never
+    reach here, so the template's time.sim is otherwise used verbatim. The
+    rewrite only EXTENDS the simulated span: a template whose yrc_start
+    already covers target_start_year is left untouched. Climate inputs must
+    cover the extended years (SWAT+ itself fails on missing weather rows).
+
+    time.sim layout: title line, column-name line (day_start yrc_start
+    day_end yrc_end step), then one all-integer data row.
+    """
+    path = txtinout_dir / "time.sim"
+    if not path.exists():
+        logger.warning(
+            "spin_up_years=%d: time.sim not found in %s; simulated span "
+            "NOT extended (warm-up inert).", spin_up_years, txtinout_dir)
+        return
+    lines = path.read_text().split("\n")
+    for i, line in enumerate(lines):
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        try:
+            vals = [int(p) for p in parts[:5]]
+        except ValueError:
+            continue  # title / column-name rows
+        yrc_start = vals[1]
+        if target_start_year >= yrc_start:
+            logger.info(
+                "spin_up_years=%d: template time.sim already starts %d "
+                "(<= requested %d); simulated span unchanged.",
+                spin_up_years, yrc_start, target_start_year)
+            return
+        # Whole-year extension: start day 0 (Jan 1) of the new first year.
+        vals[0] = 0
+        vals[1] = target_start_year
+        lines[i] = "".join(f"{v:>10d}" for v in vals)
+        path.write_text("\n".join(lines))
+        logger.info(
+            "spin_up_years=%d: time.sim start extended %d -> %d in %s.",
+            spin_up_years, yrc_start, target_start_year, txtinout_dir)
+        return
+    logger.warning(
+        "spin_up_years=%d: no parseable data row in %s; simulated span "
+        "NOT extended (warm-up inert).", spin_up_years, path)
+
+
 # ---------------------------------------------------------------------------
 # Output parser (hru_wb_day.txt -> daily Q aggregated per gauge)
 # ---------------------------------------------------------------------------
@@ -561,6 +611,20 @@ def parse_hru_wb_day(
 # Observed-flow parser
 # ---------------------------------------------------------------------------
 
+def _parse_obs_date(date_str: str) -> datetime:
+    """Parse a daily (`YYYY-MM-DD`) or monthly (`YYYY-MM`) observation date.
+
+    Monthly dates resolve to day 1, so downstream code can detect monthly
+    mode by checking whether all keys fall on day 1 (see is_monthly_obs).
+    """
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y-%m", "%Y/%m"):
+        try:
+            return datetime.strptime(date_str, fmt)
+        except ValueError:
+            continue
+    raise ValueError(f"unrecognized obs date: {date_str}")
+
+
 def parse_obs_file(obs_path: Path) -> Dict[str, float]:
     """Parse observed-flow file into {date_str (YYYY-MM-DD): flow}.
 
@@ -571,7 +635,8 @@ def parse_obs_file(obs_path: Path) -> Dict[str, float]:
       - Columns: stcd, dates, z, Q, name (header on line 1; data from line 2)
       - Q can be -99 or -99.9 for missing values; must filter
 
-    Also tolerates the simpler `date  flow` format used in tests.
+    Also tolerates the simpler `date  flow` format used in tests. Dates may
+    be daily or monthly (`YYYY-MM`, keyed by day 1).
     """
     if not obs_path.exists():
         return {}
@@ -604,10 +669,7 @@ def parse_obs_file(obs_path: Path) -> Dict[str, float]:
             date_str = parts[d_i].strip()
             q_str = parts[q_i].strip()
             try:
-                try:
-                    dt = datetime.strptime(date_str, "%Y-%m-%d")
-                except ValueError:
-                    dt = datetime.strptime(date_str, "%Y/%m/%d")
+                dt = _parse_obs_date(date_str)
                 flow = float(q_str)
                 # Filter -99 / -99.9 sentinel values
                 if flow < 0:
@@ -627,10 +689,7 @@ def parse_obs_file(obs_path: Path) -> Dict[str, float]:
             continue
         date_str = parts[0]
         try:
-            try:
-                dt = datetime.strptime(date_str, "%Y-%m-%d")
-            except ValueError:
-                dt = datetime.strptime(date_str, "%Y/%m/%d")
+            dt = _parse_obs_date(date_str)
             flow = float(parts[1])
             if flow < 0:
                 continue
@@ -640,15 +699,83 @@ def parse_obs_file(obs_path: Path) -> Dict[str, float]:
     return out
 
 
+def aggregate_sim_to_monthly(sim_daily: Dict[str, float]) -> Dict[str, float]:
+    """Aggregate a daily-Q dict to monthly means keyed by `YYYY-MM-01`."""
+    bucket: Dict[str, List[float]] = {}
+    for d, v in sim_daily.items():
+        if math.isnan(v) or math.isinf(v):
+            continue
+        bucket.setdefault(d[:7] + "-01", []).append(v)
+    return {k: (sum(vs) / len(vs)) for k, vs in bucket.items() if vs}
+
+
+def is_monthly_obs(obs: Dict[str, float]) -> bool:
+    """True iff every observation date falls on day=1 (interpreted as monthly)."""
+    if not obs:
+        return False
+    return all(d.endswith("-01") for d in obs.keys())
+
+
+def _filter_metrics_window(
+    common: List[str],
+    eval_start: str,
+    eval_end: str,
+    monthly: bool,
+    label: str,
+) -> List[str]:
+    """Restrict metric dates to the evaluation window [eval_start, eval_end].
+
+    The simulation still covers the full simulation period; only the dates
+    entering metric computation are filtered. ISO date strings compare
+    lexicographically, so this works for daily (YYYY-MM-DD) and monthly
+    (YYYY-MM-01) keys; for monthly keys the month containing eval_start is
+    included. Empty bounds are open, so absent evaluation_period (both
+    bounds empty) keeps legacy behavior unchanged.
+    """
+    if not (eval_start or eval_end):
+        return common
+    lo = eval_start
+    if lo and monthly:
+        lo = lo[:7] + "-01"
+    kept = [d for d in common
+            if (not lo or d >= lo) and (not eval_end or d <= eval_end)]
+    if len(kept) != len(common):
+        logger.info("Evaluation window [%s..%s] keeps %d/%d dates for %s.",
+                    eval_start or "-", eval_end or "-", len(kept), len(common), label)
+    if not kept:
+        logger.warning("Evaluation window [%s..%s] leaves no sim/obs overlap for %s.",
+                       eval_start or "-", eval_end or "-", label)
+    return kept
+
+
 # ---------------------------------------------------------------------------
-# Performance metrics (NSE / KGE / PBIAS / RMSE / R2)
+# Performance metrics (NSE / KGE / PBIAS / RMSE / R2 / flow ratios)
 # ---------------------------------------------------------------------------
+
+def compute_ratio(sim: List[float], obs: List[float],
+                  top_frac: float = 0.05, low: bool = False) -> float:
+    """Mean sim/obs ratio over the top (or bottom) `top_frac` of obs values.
+
+    Mirrors vic_runner.compute_ratio so peak_ratio / lowflow_ratio are
+    comparable across model combinations. NaN when not computable.
+    """
+    if not sim or not obs:
+        return float("nan")
+    k = max(1, int(len(sim) * top_frac))
+    pairs = sorted(zip(sim, obs), key=lambda x: x[1], reverse=not low)[:k]
+    sim_mean = sum(p[0] for p in pairs) / len(pairs)
+    obs_mean = sum(p[1] for p in pairs) / len(pairs)
+    if obs_mean == 0:
+        return float("nan")
+    return sim_mean / obs_mean
+
 
 def compute_metrics(sim: List[float], obs: List[float]) -> Dict[str, float]:
     n = len(sim)
     if n == 0 or n != len(obs):
         return {"NSE": float("nan"), "KGE": float("nan"), "PBIAS": float("nan"),
-                "RMSE": float("nan"), "R2": float("nan")}
+                "RMSE": float("nan"), "R2": float("nan"),
+                "peak_ratio": float("nan"), "lowflow_ratio": float("nan")}
 
     obs_mean = sum(obs) / n
     sim_mean = sum(sim) / n
@@ -656,7 +783,8 @@ def compute_metrics(sim: List[float], obs: List[float]) -> Dict[str, float]:
     obs_var = sum((o - obs_mean) ** 2 for o in obs)
     nse = 1 - sum((o - s) ** 2 for o, s in zip(obs, sim)) / obs_var if obs_var > 0 else float("nan")
 
-    pbias = 100 * sum(o - s for o, s in zip(obs, sim)) / sum(obs) if sum(obs) != 0 else float("nan")
+    # Framework-wide PBIAS convention: 100*sum(sim-obs)/sum(obs), positive = too wet (matches vic_runner).
+    pbias = 100 * sum(s - o for o, s in zip(obs, sim)) / sum(obs) if sum(obs) != 0 else float("nan")
 
     rmse = math.sqrt(sum((o - s) ** 2 for o, s in zip(obs, sim)) / n)
 
@@ -676,12 +804,17 @@ def compute_metrics(sim: List[float], obs: List[float]) -> Dict[str, float]:
 
     r2 = r * r if not math.isnan(r) else float("nan")
 
+    peak_ratio = compute_ratio(sim, obs, top_frac=0.05)
+    lowflow_ratio = compute_ratio(sim, obs, top_frac=0.20, low=True)
+
     return {
         "NSE": round(nse, 4) if not math.isnan(nse) else float("nan"),
         "KGE": round(kge, 4) if not math.isnan(kge) else float("nan"),
         "PBIAS": round(pbias, 2) if not math.isnan(pbias) else float("nan"),
         "RMSE": round(rmse, 2),
         "R2": round(r2, 4) if not math.isnan(r2) else float("nan"),
+        "peak_ratio": round(peak_ratio, 4) if not math.isnan(peak_ratio) else float("nan"),
+        "lowflow_ratio": round(lowflow_ratio, 4) if not math.isnan(lowflow_ratio) else float("nan"),
     }
 
 
@@ -720,6 +853,15 @@ def run_once(
     # 1a. Ensure SWAT+ will actually apply calibration.cal: copy cal_parms.cal
     #     fallback into the working dir if missing and patch the file.cio chg line.
     ensure_calibration_enabled(work_dir)
+
+    # 1a-bis. Universal spin_up_years: extend the working copy's time.sim
+    #     backward so the binary really simulates the warm-up years. The
+    #     spin_up_years attribute is attached dynamically by graph_nodes
+    #     (spin-up requested, no evaluation_period); configs without it keep
+    #     the template's time.sim verbatim.
+    spin_up = int(getattr(cfg, "spin_up_years", 0) or 0)
+    if spin_up > 0:
+        _extend_time_sim(work_dir, spin_up, int(str(cfg.start_date)[:4]))
 
     # 1b. Write calibration.cal
     write_calibration_cal(work_dir, params, cfg.change_types)
@@ -787,14 +929,28 @@ def run_once(
 
     # 4. Parse observed Q and align (for metrics computation)
     obs_by_date = parse_obs_file(Path(cfg.obs_file))
-    common = sorted(set(sim_by_date) & set(obs_by_date))
+    monthly = is_monthly_obs(obs_by_date)
+    sim_for_metrics = sim_by_date
+    if monthly:
+        sim_for_metrics = aggregate_sim_to_monthly(sim_by_date)
+    common = sorted(set(sim_for_metrics) & set(obs_by_date))
+    # Optional evaluation window (set dynamically on the config by
+    # graph_nodes when the run config carries evaluation_period); absent
+    # attributes keep legacy behavior.
+    common = _filter_metrics_window(
+        common,
+        str(getattr(cfg, "eval_start_date", "") or ""),
+        str(getattr(cfg, "eval_end_date", "") or ""),
+        monthly,
+        cfg.basin_name,
+    )
     if not common:
         logger.warning("No overlapping dates between sim and obs for %s",
                        cfg.basin_name)
         if cleanup and work_dir.exists():
             shutil.rmtree(work_dir, ignore_errors=True)
         return False, {}
-    sim = [sim_by_date[d] for d in common]
+    sim = [sim_for_metrics[d] for d in common]
     obs = [obs_by_date[d] for d in common]
 
     # 5. Metrics
@@ -967,6 +1123,12 @@ def run_once_batched(
     work_dir = _make_working_txtinout(template, work_root, run_tag)
 
     ensure_calibration_enabled(work_dir)
+    # Universal spin_up_years (see run_once): extend the working time.sim
+    # backward; the attribute is only attached by graph_nodes when warm-up
+    # was requested, so legacy runs keep the template verbatim.
+    spin_up = int(getattr(base_cfg, "spin_up_years", 0) or 0)
+    if spin_up > 0:
+        _extend_time_sim(work_dir, spin_up, int(str(base_cfg.start_date)[:4]))
     write_calibration_cal_batched(work_dir, blocks)
 
     # ─── Run binary ───────────────────────────────────────────────────
@@ -1023,6 +1185,12 @@ def run_once_batched(
     sim_by_sid: Dict[str, Dict[str, float]] = {}
     obs_by_sid: Dict[str, Dict[str, float]] = {}
 
+    # Optional evaluation window shared by all workers (set dynamically on
+    # every SWATPlusConfig by graph_nodes when the run config carries
+    # evaluation_period); absent attributes keep legacy behavior.
+    eval_start = str(getattr(base_cfg, "eval_start_date", "") or "")
+    eval_end = str(getattr(base_cfg, "eval_end_date", "") or "")
+
     for spec in worker_specs:
         units = [fid_to_unit[fid] for fid in spec.hru_fids if fid in fid_to_unit]
         if not units:
@@ -1042,11 +1210,18 @@ def run_once_batched(
         except Exception:
             obs_by_date = {}
 
-        common = sorted(set(sim_by_date) & set(obs_by_date))
+        monthly = is_monthly_obs(obs_by_date)
+        sim_for_metrics = sim_by_date
+        if monthly:
+            sim_for_metrics = aggregate_sim_to_monthly(sim_by_date)
+        common = sorted(set(sim_for_metrics) & set(obs_by_date))
+        common = _filter_metrics_window(
+            common, eval_start, eval_end, monthly, spec.subbasin_id,
+        )
         if not common:
             metrics_by_sid[spec.subbasin_id] = _batched_nan_metrics()
         else:
-            sim = [sim_by_date[d] for d in common]
+            sim = [sim_for_metrics[d] for d in common]
             obs = [obs_by_date[d] for d in common]
             m = compute_metrics(sim, obs)
             m["n_days"] = len(common)

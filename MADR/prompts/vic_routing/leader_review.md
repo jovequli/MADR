@@ -14,7 +14,7 @@ You MUST respond with a single JSON object. Example:
   "phase_recommendation": "stay",
   "worker_guidance": [
     {{
-      "subbasin_id": "xixian",
+      "subbasin_id": "<subbasin_id from the worker results above>",
       "priority_focus": "fix dry bias",
       "search_radius_hint": "keep",
       "param_adjustments": [
@@ -26,4 +26,4 @@ You MUST respond with a single JSON object. Example:
   "next_round_strategy": "Increase binfilt in headwaters to fix dry bias."
 }}
 ```
-Include ALL basins in worker_guidance. Output ONLY the JSON object.
+Use the exact subbasin_id values listed in the worker results above; do not copy this placeholder. Include ALL basins in worker_guidance. Output ONLY the JSON object.

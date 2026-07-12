@@ -37,15 +37,17 @@ class DiagnosisResult:
     Attributes
     ----------
     primary_issue : str
-        主要问题类型: "volume"|"timing"|"shape"|"baseflow"|"combined"|"none"
+        主要问题类型: "volume"|"timing"|"shape"|"baseflow"|"combined"|"none"|"unknown"
     severity : str
         严重程度: "minor" (NSE>0.65), "moderate" (0.4<NSE≤0.65), "severe" (NSE≤0.4)
     severity_score : float
         严重度数值 [0, 1]，用于playbook优先级计算
     vic_responsibility : float
-        VIC参数导致的责任占比 [0, 1]
+        VIC参数导致的责任占比 [0, 1]；vic_cama_flood下指VIC陆面阶段；
+        swat无独立routing模块，此项为NaN(不划分)
     routing_responsibility : float
-        routing参数导致的责任占比 [0, 1]
+        routing参数导致的责任占比 [0, 1]；vic_routing指Lohmann routing，
+        vic_cama_flood指CaMa-Flood河道阶段；swat为NaN(不划分)
     upstream_responsibility : float
         上游输入导致的责任占比 [0, 1]
     reasoning : str
@@ -76,6 +78,8 @@ class DiagnosisResult:
         """Compact summary for Leader."""
         if self.primary_issue == "none":
             return "no significant issue"
+        if self.primary_issue == "unknown":
+            return "insufficient data for diagnosis"
         resp_parts = []
         if self.vic_responsibility > 0.3:
             resp_parts.append(f"VIC {self.vic_responsibility:.0%}")
@@ -125,32 +129,63 @@ def diagnose_round(
     metrics : dict
         当前轮次指标，必须包含NSE，可选: PBIAS, peak_ratio, lowflow_ratio,
         peak_timing_bias_days, recession_k_ratio, baseflow_index_bias_pct,
-        peak_magnitude_bias_pct, KGE, RMSE
+        peak_magnitude_bias_pct, KGE, RMSE, timestep ("daily"|"monthly")
     prev_metrics : dict, optional
         上一轮指标，用于判断改进趋势
     context : dict, optional
-        额外上下文: is_headwater (bool), upstream_quality (str: good/acceptable/poor)
+        额外上下文: is_headwater (bool), upstream_quality (str: good/acceptable/poor),
+        model_combination (str: vic_routing/vic_cama_flood/swat, 默认vic_routing),
+        current_params (dict, 可选): 被诊断候选/中心的当前参数值，用于证据门控
+        规则(如swat的perco规则需要已验证的deep_seep值)；缺省=旧行为，
+        证据门控的建议不输出
 
     Returns
     -------
     DiagnosisResult
         包含问题分类、责任归因、建议列表
+
+    Notes
+    -----
+    Timestep handling (daily vs monthly observations):
+
+    - When obs are monthly, the runners aggregate sim to monthly means before
+      computing metrics and tag ``metrics["timestep"] = "monthly"``.
+    - At monthly scale the timing, recession and baseflow-index signatures
+      (peak_timing_bias_days, recession_k_ratio, baseflow_index_bias_pct)
+      cannot be estimated from monthly means: the runners emit NaN for them,
+      so they fall through the "insufficient data" path (no timing, shape or
+      baseflow-index classification, no recommendation from those rules).
+      peak_timing is additionally forced to NaN below as a guard: on a
+      monthly series one index step is one MONTH, so the day thresholds
+      (|bias|>2) and the velocity magnitude tiers would misread it.
+    - Volume metrics (NSE, PBIAS, peak_ratio, lowflow_ratio) survive monthly
+      aggregation, so the volume and low-flow rules below stay valid at
+      monthly scale.
+    - The SWAT+ monthly path computes no signatures at all, so those metrics
+      are absent there and fall through the same NaN handling. Daily behavior
+      is unchanged: without ``timestep == "monthly"`` no rule is altered.
     """
     try:
         if context is None:
             context = {}
         is_headwater = context.get("is_headwater", True)
         upstream_quality = context.get("upstream_quality", "good")
+        model_combination = str(context.get("model_combination", "vic_routing"))
+        current_params = context.get("current_params") or {}
 
         # 提取指标
         nse = _safe_float(metrics.get("NSE"), -999)
-        pbias = _safe_float(metrics.get("PBIAS"), 0.0)
-        peak_ratio = _safe_float(metrics.get("peak_ratio"), 1.0)
-        lowflow_ratio = _safe_float(metrics.get("lowflow_ratio"), 1.0)
-        peak_timing = _safe_float(metrics.get("peak_timing_bias_days"), 0.0)
-        recession_k = _safe_float(metrics.get("recession_k_ratio"), 1.0)
-        baseflow_bias = _safe_float(metrics.get("baseflow_index_bias_pct"), 0.0)
-        peak_mag_bias = _safe_float(metrics.get("peak_magnitude_bias_pct"), 0.0)
+        pbias = _safe_float(metrics.get("PBIAS"), float("nan"))
+        peak_ratio = _safe_float(metrics.get("peak_ratio"), float("nan"))
+        lowflow_ratio = _safe_float(metrics.get("lowflow_ratio"), float("nan"))
+        peak_timing = _safe_float(metrics.get("peak_timing_bias_days"), float("nan"))
+        recession_k = _safe_float(metrics.get("recession_k_ratio"), float("nan"))
+        baseflow_bias = _safe_float(metrics.get("baseflow_index_bias_pct"), float("nan"))
+        peak_mag_bias = _safe_float(metrics.get("peak_magnitude_bias_pct"), float("nan"))
+
+        # 月尺度下peak_timing以“月”为单位，日尺度timing规则不适用(见Notes)
+        if str(metrics.get("timestep", "daily")).lower() == "monthly":
+            peak_timing = float("nan")
 
         # Step 1: 严重度分类
         severity, severity_score = _classify_severity(nse)
@@ -162,20 +197,20 @@ def diagnose_round(
 
         # Step 3: 责任归因
         vic_resp, routing_resp, upstream_resp = _attribute_responsibility(
-            primary_issue, is_headwater, upstream_quality
+            primary_issue, is_headwater, upstream_quality, model_combination
         )
 
         # Step 4: 生成推理文本
         reasoning = _generate_reasoning(
             primary_issue, pbias, peak_timing, recession_k,
-            baseflow_bias, vic_resp, routing_resp
+            baseflow_bias, vic_resp, routing_resp, model_combination
         )
 
         # Step 5: 生成建议
         recommendations = _generate_recommendations(
             primary_issue, pbias, peak_ratio, lowflow_ratio,
             peak_timing, recession_k, baseflow_bias, peak_mag_bias,
-            severity_score
+            severity_score, model_combination, current_params
         )
 
         # Step 6: 改进趋势
@@ -196,6 +231,7 @@ def diagnose_round(
     except Exception as e:
         # 安全降级
         return DiagnosisResult(
+            primary_issue="unknown",
             reasoning=f"Diagnostic fallback: {type(e).__name__}: {e}",
         )
 
@@ -231,13 +267,16 @@ def _classify_primary_issue(
     baseflow_bias: float, peak_ratio: float, lowflow_ratio: float
 ) -> str:
     """
-    分类主要问题: volume, timing, shape, baseflow, combined, none
+    分类主要问题: volume, timing, shape, baseflow, combined, none, unknown
 
     阈值:
     - volume: |PBIAS| > 10% 或 peak_ratio偏离1.0超过15%
     - timing: |peak_timing_bias| > 2天
     - shape:  recession_k_ratio ∉ [0.7, 1.3]
     - baseflow: |baseflow_index_bias| > 20% 或 lowflow_ratio偏离1.0超过20%
+    - unknown: 全部指标缺失(NaN)，证据不足
+
+    NaN指标不触发任何规则(与NaN比较恒为False)。
     """
     has_volume = abs(pbias) > 10.0 or abs(peak_ratio - 1.0) > 0.15
     has_timing = abs(peak_timing) > 2.0
@@ -247,6 +286,10 @@ def _classify_primary_issue(
     issues = sum([has_volume, has_timing, has_shape, has_baseflow])
 
     if issues == 0:
+        if all(math.isnan(v) for v in
+               (pbias, peak_timing, recession_k, baseflow_bias,
+                peak_ratio, lowflow_ratio)):
+            return "unknown"
         return "none"
     elif issues == 1:
         if has_volume:
@@ -266,10 +309,19 @@ def _classify_primary_issue(
 # ============================================================================
 
 def _attribute_responsibility(
-    primary_issue: str, is_headwater: bool, upstream_quality: str
+    primary_issue: str, is_headwater: bool, upstream_quality: str,
+    model_combination: str = "vic_routing",
 ) -> tuple:
     """
     返回 (vic_resp, routing_resp, upstream_resp)，和为1.0。
+
+    组合语义:
+    - vic_routing: vic_resp=VIC陆面参数, routing_resp=Lohmann routing参数
+    - vic_cama_flood: 数值划分与vic_routing相同，但vic_resp指VIC陆面阶段、
+      routing_resp指CaMa-Flood河道阶段
+    - swat: SWAT+无独立routing模块，不做陆面/routing划分，
+      vic_resp与routing_resp返回NaN(仅保留upstream_resp)；
+      消费方须容忍NaN(与NaN比较恒为False)
 
     归因规则(源自水文标定最佳实践):
     - volume → VIC 0.9, Routing 0.1
@@ -279,7 +331,7 @@ def _attribute_responsibility(
     - combined + 上游差 → Upstream 0.5, VIC 0.3, Routing 0.2
     - combined + 上游好 → VIC 0.5, Routing 0.5
     """
-    if primary_issue == "none":
+    if primary_issue in ("none", "unknown"):
         return 0.0, 0.0, 0.0
 
     ATTRIBUTION = {
@@ -306,6 +358,10 @@ def _attribute_responsibility(
         rout /= total
         up /= total
 
+    # swat: 无独立routing模块，不划分陆面/routing责任(见docstring)
+    if model_combination == "swat":
+        return float("nan"), float("nan"), round(up, 2)
+
     return round(vic, 2), round(rout, 2), round(up, 2)
 
 
@@ -316,34 +372,74 @@ def _attribute_responsibility(
 def _generate_reasoning(
     primary_issue: str, pbias: float, peak_timing: float,
     recession_k: float, baseflow_bias: float,
-    vic_resp: float, routing_resp: float
+    vic_resp: float, routing_resp: float,
+    model_combination: str = "vic_routing",
 ) -> str:
-    if primary_issue == "none":
+    # 按模型组合调整措辞(vic_routing措辞与原版逐字一致)
+    land = "SWAT+" if model_combination == "swat" else "VIC"
+    if model_combination == "swat":
+        too_fast, too_slow = "surface lag too short", "surface lag too long"
+    elif model_combination == "vic_cama_flood":
+        too_fast, too_slow = "channel wave too fast", "channel wave too slow"
+    else:
+        too_fast, too_slow = "routing velocity too fast", "routing velocity too slow"
+    if primary_issue == "unknown":
+        return "Insufficient data: diagnostic metrics missing, cannot classify issue."
+    elif primary_issue == "none":
+        missing = [name for name, v in (
+            ("PBIAS", pbias), ("peak_timing", peak_timing),
+            ("recession_k", recession_k), ("baseflow_bias", baseflow_bias),
+        ) if math.isnan(v)]
+        if missing:
+            return (f"No issue found in available metrics; "
+                    f"insufficient data for: {', '.join(missing)}.")
         return "Simulation acceptable, no major issue."
     elif primary_issue == "volume":
-        if pbias > 0:
-            return f"Too wet (PBIAS={pbias:.1f}%), VIC runoff too high, reduce surface runoff."
+        # Canonical convention (all models): PBIAS = 100*sum(sim-obs)/sum(obs), positive = too wet
+        if math.isnan(pbias):
+            return "Volume issue (peak_ratio deviates from 1.0), PBIAS unavailable (insufficient data)."
+        elif pbias > 0:
+            return f"Too wet (PBIAS={pbias:.1f}%), {land} runoff too high, reduce surface runoff."
         else:
-            return f"Too dry (PBIAS={pbias:.1f}%), VIC runoff too low, increase surface runoff."
+            return f"Too dry (PBIAS={pbias:.1f}%), {land} runoff too low, increase surface runoff."
     elif primary_issue == "timing":
         if peak_timing < 0:
-            return f"Peak too early ({peak_timing:.1f}d), routing velocity too fast."
+            return f"Peak too early ({peak_timing:.1f}d), {too_fast}."
         else:
-            return f"Peak too late ({peak_timing:.1f}d), routing velocity too slow."
+            return f"Peak too late ({peak_timing:.1f}d), {too_slow}."
     elif primary_issue == "shape":
+        if model_combination == "swat":
+            # SWAT+退水由地下水模块控制(alpha/flo_min)，而非土壤储水
+            if recession_k > 1.3:
+                return (f"Recession too fast (k_ratio={recession_k:.2f}), "
+                        f"aquifer releases too quickly (alpha too high / flo_min too low).")
+            else:
+                return (f"Recession too slow (k_ratio={recession_k:.2f}), "
+                        f"aquifer releases too slowly (alpha too low / flo_min too high).")
         if recession_k > 1.3:
             return f"Recession too fast (k_ratio={recession_k:.2f}), insufficient soil storage."
         else:
             return f"Recession too slow (k_ratio={recession_k:.2f}), excessive soil storage."
     elif primary_issue == "baseflow":
-        if baseflow_bias < -20:
-            return f"Baseflow too low (bias={baseflow_bias:.1f}%), insufficient deep soil release."
+        deep_source = "aquifer return flow" if model_combination == "swat" else "deep soil release"
+        if math.isnan(baseflow_bias):
+            return "Baseflow issue (lowflow_ratio deviates from 1.0), baseflow index unavailable (insufficient data)."
+        elif baseflow_bias < -20:
+            return f"Baseflow too low (bias={baseflow_bias:.1f}%), insufficient {deep_source}."
         else:
-            return f"Baseflow too high (bias={baseflow_bias:.1f}%), excessive deep soil release."
+            return f"Baseflow too high (bias={baseflow_bias:.1f}%), excessive {deep_source}."
     else:  # combined
+        pbias_str = "n/a" if math.isnan(pbias) else f"{pbias:.1f}%"
+        timing_str = "n/a" if math.isnan(peak_timing) else f"{peak_timing:.1f}d"
+        if model_combination == "swat":
+            # SWAT+一体化模型无VIC/routing责任划分(resp为NaN)
+            return (
+                f"Combined issue: multiple signatures off (SWAT+ integrated model, no land/routing split). "
+                f"PBIAS={pbias_str}, peak_timing={timing_str}."
+            )
         return (
             f"Combined issue: VIC resp.={vic_resp:.0%}, Routing resp.={routing_resp:.0%}. "
-            f"PBIAS={pbias:.1f}%, peak_timing={peak_timing:.1f}d."
+            f"PBIAS={pbias_str}, peak_timing={timing_str}."
         )
 
 
@@ -354,17 +450,58 @@ def _generate_reasoning(
 def _generate_recommendations(
     primary_issue: str, pbias: float, peak_ratio: float,
     lowflow_ratio: float, peak_timing: float, recession_k: float,
-    baseflow_bias: float, peak_mag_bias: float, severity_score: float
+    baseflow_bias: float, peak_mag_bias: float, severity_score: float,
+    model_combination: str = "vic_routing",
+    current_params: Optional[Dict[str, Any]] = None,
 ) -> List[Dict]:
     """
     Generate parameter adjustment recommendations based on diagnosis.
 
     Each rec: {param, direction, magnitude, confidence, reason, category}
-    category: "vic" or "routing"
-    """
-    recs = []
+    category: "vic"/"routing" for the VIC combinations, "swat" for SWAT+
 
-    # === VIC recommendations ===
+    The same diagnostic conditions map to a per-combination parameter menu:
+    - vic_routing: VIC soil params + Lohmann velocity/diffusivity
+    - vic_cama_flood: VIC soil params + CaMa channel Hc/Hmin/Wc/Wmin
+    - swat: SWAT+ HRU params (integrated routing, no separate routing phase)
+
+    current_params (the candidate/center being diagnosed) is consumed only by
+    the swat menu for evidence-gated rules; the VIC menus ignore it.
+    """
+    if model_combination == "swat":
+        recs = _swat_recommendations(
+            pbias, peak_ratio, lowflow_ratio, peak_timing,
+            recession_k, baseflow_bias, peak_mag_bias, current_params
+        )
+    else:
+        recs = _vic_soil_recommendations(
+            pbias, peak_ratio, lowflow_ratio, recession_k, baseflow_bias
+        )
+        if model_combination == "vic_cama_flood":
+            recs += _cama_channel_recommendations(
+                pbias, peak_timing, recession_k, baseflow_bias, peak_mag_bias
+            )
+        else:
+            recs += _lohmann_routing_recommendations(
+                pbias, peak_timing, peak_mag_bias
+            )
+
+    # Sort by confidence × severity
+    severity_weight = 1.0 + severity_score  # [1.0, 2.0]
+    for rec in recs:
+        rec["priority"] = rec["confidence"] * severity_weight
+
+    recs.sort(key=lambda r: r["priority"], reverse=True)
+
+    return recs[:6]
+
+
+def _vic_soil_recommendations(
+    pbias: float, peak_ratio: float, lowflow_ratio: float,
+    recession_k: float, baseflow_bias: float
+) -> List[Dict]:
+    """VIC soil-parameter rules (shared by vic_routing and vic_cama_flood)."""
+    recs = []
 
     # Peak too high → decrease binfilt
     if peak_ratio > 1.05:
@@ -467,7 +604,14 @@ def _generate_recommendations(
             "category": "vic"
         })
 
-    # === Routing recommendations ===
+    return recs
+
+
+def _lohmann_routing_recommendations(
+    pbias: float, peak_timing: float, peak_mag_bias: float
+) -> List[Dict]:
+    """Lohmann routing rules (vic_routing)."""
+    recs = []
 
     # Peak too early → decrease velocity
     if peak_timing < -2.0:
@@ -507,14 +651,327 @@ def _generate_recommendations(
             "category": "routing"
         })
 
-    # Sort by confidence × severity
-    severity_weight = 1.0 + severity_score  # [1.0, 2.0]
-    for rec in recs:
-        rec["priority"] = rec["confidence"] * severity_weight
+    return recs
 
-    recs.sort(key=lambda r: r["priority"], reverse=True)
 
-    return recs[:6]
+def _cama_channel_recommendations(
+    pbias: float, peak_timing: float, recession_k: float,
+    baseflow_bias: float, peak_mag_bias: float
+) -> List[Dict]:
+    """CaMa-Flood channel geometry rules (vic_cama_flood).
+
+    Directions follow prompts/vic_cama_flood/param_knowledge_leader.md:
+    higher Hc/Hmin → deeper channel → slower wave; higher Wc/Wmin → more
+    channel storage → attenuated peaks and sustained low flow.
+    """
+    recs = []
+
+    # Peak too early → channel too fast → increase Hc (+ Hmin for headwaters)
+    if peak_timing < -2.0:
+        mag = "large" if peak_timing < -5 else "medium" if peak_timing < -3 else "small"
+        recs.append({
+            "param": "Hc", "direction": "increase", "magnitude": mag,
+            "confidence": min(0.9, 0.5 + abs(peak_timing) * 0.1),
+            "reason": f"Peak {peak_timing:.1f}d early, increase Hc to slow channel wave",
+            "category": "routing"
+        })
+        recs.append({
+            "param": "Hmin", "direction": "increase", "magnitude": "small",
+            "confidence": 0.6,
+            "reason": "Peak early, increase Hmin to slow headwater streams",
+            "category": "routing"
+        })
+
+    # Peak too late → channel too slow → decrease Hc (+ Hmin)
+    if peak_timing > 2.0:
+        mag = "large" if peak_timing > 5 else "medium" if peak_timing > 3 else "small"
+        recs.append({
+            "param": "Hc", "direction": "decrease", "magnitude": mag,
+            "confidence": min(0.9, 0.5 + abs(peak_timing) * 0.1),
+            "reason": f"Peak {peak_timing:.1f}d late, decrease Hc to speed channel wave",
+            "category": "routing"
+        })
+        recs.append({
+            "param": "Hmin", "direction": "decrease", "magnitude": "small",
+            "confidence": 0.6,
+            "reason": "Peak late, decrease Hmin to speed headwater streams",
+            "category": "routing"
+        })
+
+    # Peak too sharp → increase Wc (more channel storage, attenuation)
+    if peak_mag_bias > 20.0 and abs(pbias) < 10.0:
+        recs.append({
+            "param": "Wc", "direction": "increase", "magnitude": "small",
+            "confidence": 0.7,
+            "reason": f"Peak mag bias={peak_mag_bias:.1f}% but volume ok, increase Wc to attenuate",
+            "category": "routing"
+        })
+
+    # Peak too flat → decrease Wc
+    if peak_mag_bias < -20.0 and abs(pbias) < 10.0:
+        recs.append({
+            "param": "Wc", "direction": "decrease", "magnitude": "small",
+            "confidence": 0.7,
+            "reason": f"Peak mag bias={peak_mag_bias:.1f}% but volume ok, decrease Wc to sharpen",
+            "category": "routing"
+        })
+
+    # Recession too fast → increase Wmin (channel-side assist to soil_d3)
+    if recession_k > 1.3:
+        recs.append({
+            "param": "Wmin", "direction": "increase", "magnitude": "small",
+            "confidence": 0.6,
+            "reason": f"recession_k={recession_k:.2f}>1.3, increase Wmin to prolong small-stream release",
+            "category": "routing"
+        })
+
+    # Recession too slow → decrease Wmin
+    if recession_k < 0.7:
+        recs.append({
+            "param": "Wmin", "direction": "decrease", "magnitude": "small",
+            "confidence": 0.6,
+            "reason": f"recession_k={recession_k:.2f}<0.7, decrease Wmin to speed small-stream release",
+            "category": "routing"
+        })
+
+    # Baseflow too low → increase Wmin to keep small streams populated
+    if baseflow_bias < -20.0:
+        recs.append({
+            "param": "Wmin", "direction": "increase", "magnitude": "small",
+            "confidence": 0.55,
+            "reason": f"baseflow_bias={baseflow_bias:.1f}% too low, increase Wmin to sustain low flow",
+            "category": "routing"
+        })
+
+    return recs
+
+
+def _swat_recommendations(
+    pbias: float, peak_ratio: float, lowflow_ratio: float,
+    peak_timing: float, recession_k: float, baseflow_bias: float,
+    peak_mag_bias: float,
+    current_params: Optional[Dict[str, Any]] = None,
+) -> List[Dict]:
+    """SWAT+ HRU parameter rules (swat combination, integrated routing).
+
+    Directions follow prompts/swat/param_knowledge_leader.md under the
+    canonical PBIAS = 100*sum(sim-obs)/sum(obs) convention (positive = wet).
+    cn2 and awc are pctchg params: direction refers to the sign of the pctchg.
+    current_params (candidate being diagnosed) gates the perco rule: without
+    a verified low deep_seep no structured perco rec is emitted.
+    """
+    recs = []
+
+    # Peak too high → decrease cn2 (less surface runoff), increase surlag
+    if peak_ratio > 1.05:
+        mag = "large" if peak_ratio > 1.2 else "medium" if peak_ratio > 1.1 else "small"
+        recs.append({
+            "param": "cn2", "direction": "decrease", "magnitude": mag,
+            "confidence": min(0.95, 0.5 + abs(peak_ratio - 1.0)),
+            "reason": f"peak_ratio={peak_ratio:.2f}>1.05, decrease cn2 (pctchg) to reduce peak",
+            "category": "swat"
+        })
+        recs.append({
+            "param": "surlag", "direction": "increase", "magnitude": "small",
+            "confidence": 0.6,
+            "reason": "Peaks too high, increase surlag to lag surface runoff",
+            "category": "swat"
+        })
+
+    # Peak too low → increase cn2, decrease surlag
+    if peak_ratio < 0.95:
+        mag = "large" if peak_ratio < 0.8 else "medium" if peak_ratio < 0.9 else "small"
+        recs.append({
+            "param": "cn2", "direction": "increase", "magnitude": mag,
+            "confidence": min(0.95, 0.5 + abs(peak_ratio - 1.0)),
+            "reason": f"peak_ratio={peak_ratio:.2f}<0.95, increase cn2 (pctchg) to raise peak",
+            "category": "swat"
+        })
+        recs.append({
+            "param": "surlag", "direction": "decrease", "magnitude": "small",
+            "confidence": 0.6,
+            "reason": "Peaks too low, decrease surlag to concentrate surface runoff",
+            "category": "swat"
+        })
+
+    # Low flow too low → groundwater menu per the PERCO / DRY-BIAS RULE in
+    # prompts/swat/param_knowledge_leader.md: check alpha / flo_min /
+    # deep_seep / revap_co FIRST.
+    # NOTE (empirical, Yellow 1981-1990 monthly run, 2026-07): "increase perco
+    # to recharge the aquifer" is COUNTERPRODUCTIVE when deep_seep > 0 — the
+    # extra percolation is routed to deep storage and lost from streamflow
+    # (PBIAS collapsed from -80% to -98% under perco=0.95 + awc cuts).
+    # Recommend reducing deep-percolation losses instead; verify perco's true
+    # direction with a single-parameter probe before combined moves.
+    if lowflow_ratio < 0.9:
+        recs.append({
+            "param": "flo_min", "direction": "increase", "magnitude": "medium",
+            "confidence": 0.7,
+            "reason": f"lowflow_ratio={lowflow_ratio:.2f}<0.9, increase flo_min for baseflow",
+            "category": "swat"
+        })
+        recs.append({
+            "param": "alpha", "direction": "decrease", "magnitude": "small",
+            "confidence": 0.6,
+            "reason": ("lowflow too low, decrease alpha to slow aquifer "
+                       "recession and sustain dry-season baseflow"),
+            "category": "swat"
+        })
+        recs.append({
+            "param": "deep_seep", "direction": "decrease", "magnitude": "small",
+            "confidence": 0.5,
+            "reason": ("lowflow too low, decrease deep_seep to keep aquifer "
+                       "water in the stream (do NOT raise perco: verified to "
+                       "route water to deep losses in this project)"),
+            "category": "swat"
+        })
+        recs.append({
+            "param": "revap_co", "direction": "decrease", "magnitude": "small",
+            "confidence": 0.5,
+            "reason": ("lowflow too low, decrease revap_co: less aquifer "
+                       "water lost to ET, more baseflow"),
+            "category": "swat"
+        })
+        # Evidence-gated perco (per the perco rule in the prompts): emit a
+        # structured perco rec ONLY when the caller supplied current_params
+        # and the CURRENT deep_seep is verified very low (<= 0.01). Without
+        # that evidence (no current_params, or deep_seep > 0.01) the extra
+        # percolation is lost to deep storage, so no perco rec is emitted.
+        deep_seep_now = _safe_float(
+            (current_params or {}).get("deep_seep"), float("nan"))
+        if deep_seep_now <= 0.01:
+            recs.append({
+                "param": "perco", "direction": "increase", "magnitude": "small",
+                "confidence": 0.3,
+                "reason": (f"lowflow too low and current deep_seep="
+                           f"{deep_seep_now:g} verified <= 0.01, so extra "
+                           "percolation reaches the shallow aquifer instead "
+                           "of deep losses; run a single-parameter probe "
+                           "before any combined move"),
+                "category": "swat"
+            })
+
+    # Low flow too high → decrease flo_min, increase deep_seep
+    if lowflow_ratio > 1.1:
+        recs.append({
+            "param": "flo_min", "direction": "decrease", "magnitude": "medium",
+            "confidence": 0.7,
+            "reason": f"lowflow_ratio={lowflow_ratio:.2f}>1.1, decrease flo_min to reduce baseflow",
+            "category": "swat"
+        })
+        recs.append({
+            "param": "deep_seep", "direction": "increase", "magnitude": "small",
+            "confidence": 0.55,
+            "reason": "lowflow too high, increase deep_seep to divert recharge to deep storage",
+            "category": "swat"
+        })
+
+    # PBIAS too wet (positive = overestimated volume) → decrease cn2, increase esco
+    if pbias > 10.0:
+        recs.append({
+            "param": "cn2", "direction": "decrease", "magnitude": "medium",
+            "confidence": 0.75,
+            "reason": f"PBIAS={pbias:.1f}% too wet, decrease cn2 (pctchg) to cut surface runoff",
+            "category": "swat"
+        })
+        recs.append({
+            "param": "esco", "direction": "increase", "magnitude": "small",
+            "confidence": 0.6,
+            "reason": "Too wet, increase esco to boost soil evaporation",
+            "category": "swat"
+        })
+
+    # PBIAS too dry → increase cn2, decrease esco
+    if pbias < -10.0:
+        recs.append({
+            "param": "cn2", "direction": "increase", "magnitude": "medium",
+            "confidence": 0.75,
+            "reason": f"PBIAS={pbias:.1f}% too dry, increase cn2 (pctchg) to add surface runoff",
+            "category": "swat"
+        })
+        recs.append({
+            "param": "esco", "direction": "decrease", "magnitude": "small",
+            "confidence": 0.6,
+            "reason": "Too dry, decrease esco to reduce soil evaporation",
+            "category": "swat"
+        })
+
+    # Recession too fast → decrease alpha (slower baseflow recession)
+    if recession_k > 1.3:
+        recs.append({
+            "param": "alpha", "direction": "decrease", "magnitude": "medium",
+            "confidence": 0.8,
+            "reason": f"recession_k={recession_k:.2f}>1.3, decrease alpha to slow recession",
+            "category": "swat"
+        })
+
+    # Recession too slow → increase alpha
+    if recession_k < 0.7:
+        recs.append({
+            "param": "alpha", "direction": "increase", "magnitude": "medium",
+            "confidence": 0.8,
+            "reason": f"recession_k={recession_k:.2f}<0.7, increase alpha to speed recession",
+            "category": "swat"
+        })
+
+    # Baseflow too low → reduce deep losses. See the empirical note above:
+    # raising perco feeds deep_seep losses and DRIES the river in this
+    # project; probe perco's direction individually before recommending it.
+    if baseflow_bias < -20.0:
+        recs.append({
+            "param": "deep_seep", "direction": "decrease", "magnitude": "medium",
+            "confidence": 0.6,
+            "reason": (f"baseflow_bias={baseflow_bias:.1f}% too low, decrease "
+                       f"deep_seep so aquifer recharge returns to the stream "
+                       f"(perco increase empirically counterproductive here)"),
+            "category": "swat"
+        })
+
+    # Peak too early → increase surlag (+ lat_ttime), longer surface lag
+    if peak_timing < -2.0:
+        mag = "large" if peak_timing < -5 else "medium" if peak_timing < -3 else "small"
+        recs.append({
+            "param": "surlag", "direction": "increase", "magnitude": mag,
+            "confidence": min(0.9, 0.5 + abs(peak_timing) * 0.1),
+            "reason": f"Peak {peak_timing:.1f}d early, increase surlag to delay peak",
+            "category": "swat"
+        })
+        recs.append({
+            "param": "lat_ttime", "direction": "increase", "magnitude": "small",
+            "confidence": 0.55,
+            "reason": "Peak early, increase lat_ttime to delay subsurface flow",
+            "category": "swat"
+        })
+
+    # Peak too late → decrease surlag
+    if peak_timing > 2.0:
+        mag = "large" if peak_timing > 5 else "medium" if peak_timing > 3 else "small"
+        recs.append({
+            "param": "surlag", "direction": "decrease", "magnitude": mag,
+            "confidence": min(0.9, 0.5 + abs(peak_timing) * 0.1),
+            "reason": f"Peak {peak_timing:.1f}d late, decrease surlag to advance peak",
+            "category": "swat"
+        })
+
+    # Peak too sharp but volume ok → increase awc (more soil buffering)
+    if peak_mag_bias > 20.0 and abs(pbias) < 10.0:
+        recs.append({
+            "param": "awc", "direction": "increase", "magnitude": "small",
+            "confidence": 0.7,
+            "reason": f"Peak mag bias={peak_mag_bias:.1f}% but volume ok, increase awc (pctchg) to buffer peaks",
+            "category": "swat"
+        })
+
+    # Peak too flat but volume ok → decrease awc
+    if peak_mag_bias < -20.0 and abs(pbias) < 10.0:
+        recs.append({
+            "param": "awc", "direction": "decrease", "magnitude": "small",
+            "confidence": 0.7,
+            "reason": f"Peak mag bias={peak_mag_bias:.1f}% but volume ok, decrease awc (pctchg) to sharpen peaks",
+            "category": "swat"
+        })
+
+    return recs
 
 
 # ============================================================================

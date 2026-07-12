@@ -20,6 +20,7 @@ binary. Mode = "real" invokes the actual binary and external scripts.
         "forcing_dir":     "/abs/path/to/inp/huaihe",
         "forcing_var":     "Runoff",
         "diminfo":         "diminfo_bengbu_025deg.txt",
+        "inpmat_file":     "inpmat_bengbu_025deg.bin", // optional; default derived from basin_map
         "outlet": {"lat": 32.95, "lon": 117.36},
         "obs_file":        "/abs/path/to/bengbu_obs.csv",
         "start_year":      1990,
@@ -30,13 +31,14 @@ binary. Mode = "real" invokes the actual binary and external scripts.
 """
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import math
 import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from ..param_validator import SOIL_PARAM_KEYS
 from ..vic_executor import VICExecutor, VICConfig
@@ -359,7 +361,7 @@ class VICCamaFloodExecutor(ModelExecutor):
         try:
             sim = self._read_cama_output(exp_dir, cama)
             obs = self._read_observations(cama)
-            self._save_sim_hydrograph(exp_dir, cama, sim, obs)
+            self._save_sim_hydrograph(exp_dir, sim, obs)
             return True, self._compute_metrics(sim, obs)
         except Exception as e:  # noqa: BLE001
             logger.error("[%s] metric computation failed: %s", subbasin_id, e)
@@ -390,6 +392,29 @@ class VICCamaFloodExecutor(ModelExecutor):
         if vic_cfg is None:
             logger.error("[%s] no VIC config registered", subbasin_id)
             return None
+        # The VIC binary's simulated window comes from the global template's
+        # STARTYEAR line; run_vic_flux_only only rewrites it when
+        # spin_up_years is set on the RuntimeConfig. When universal
+        # spin_up_years shifted vic_cfg.start_year backward at the graph
+        # layer (sim_start_extended marker) and that start_year is EARLIER
+        # than the template's, express the difference as RuntimeConfig
+        # start_year/spin_up_years so the rewrite fires and VIC really
+        # simulates the extended window (otherwise the warm-up years convert
+        # to -9999 fill runoff and pollute CaMa's restart chain). Without
+        # the marker the legacy no-rewrite path is kept untouched: a
+        # start_year that merely disagrees with the template must never
+        # trigger a rewrite.
+        start_year = int(vic_cfg.start_year)
+        spin_up = 0
+        if getattr(vic_cfg, "sim_start_extended", False):
+            tmpl_start = self._template_start_year(vic_cfg.global_base)
+            if tmpl_start is not None and start_year < tmpl_start:
+                spin_up = tmpl_start - start_year
+                start_year = tmpl_start
+                logger.info(
+                    "[%s] start_year %d predates template STARTYEAR %d; "
+                    "rewriting STARTYEAR so VIC simulates the extended window.",
+                    subbasin_id, start_year - spin_up, tmpl_start)
         rcfg = vic_runner.RuntimeConfig(
             basin_name=vic_cfg.basin_name,
             base_output_dir=vic_cfg.base_output_dir,
@@ -399,9 +424,10 @@ class VICCamaFloodExecutor(ModelExecutor):
             rout_template_dir=vic_cfg.rout_template_dir,
             vic_exe=vic_cfg.vic_exe,
             rout_exe=vic_cfg.rout_exe,
-            start_year=int(vic_cfg.start_year),
+            start_year=start_year,
             end_year=int(vic_cfg.end_year),
             flux_prefix=vic_cfg.flux_prefix,
+            spin_up_years=spin_up,
         )
         log = log_path or f"/tmp/vic_{subbasin_id}_{run_id}_{candidate_id}.log"
         ok, vic_result = vic_runner.run_vic_flux_only(
@@ -409,6 +435,19 @@ class VICCamaFloodExecutor(ModelExecutor):
             upstream_soil_info=upstream_soil_info,
         )
         return vic_result if ok else None
+
+    @staticmethod
+    def _template_start_year(global_base: str) -> Optional[int]:
+        """Return the STARTYEAR from a VIC global-param template, or None."""
+        try:
+            with open(global_base, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    stripped = line.strip()
+                    if stripped.startswith("STARTYEAR"):
+                        return int(stripped.split()[1])
+        except (OSError, ValueError, IndexError):
+            pass
+        return None
 
     # ---- VIC raw fluxes -> CaMa runoff NetCDF (inline) ----------------
     def _convert_vic_result_to_nc(
@@ -769,7 +808,13 @@ class VICCamaFloodExecutor(ModelExecutor):
         """One-year namelist (proven run_basin form): LPTHOUT off, NetCDF output,
         per-year forcing, restart chaining."""
         forcing_var = cama.get("forcing_var", "Runoff")
-        inpmat = basin_map / f"inpmat_{cama['basin_map'].replace('_15min', '_025deg')}.bin"
+        # inpmat filename: explicit "inpmat_file" config key wins; otherwise
+        # fall back to the legacy naming convention (map dir "<name>_15min"
+        # pairs with "inpmat_<name>_025deg.bin"), which is map/forcing
+        # resolution dependent.
+        inpmat_name = (cama.get("inpmat_file")
+                       or f"inpmat_{cama['basin_map'].replace('_15min', '_025deg')}.bin")
+        inpmat = basin_map / inpmat_name
         if first:
             lrestart = ".FALSE."
             creststo = "''"
@@ -850,12 +895,14 @@ class VICCamaFloodExecutor(ModelExecutor):
 """
 
     # ---- CaMa output + metrics ----------------------------------------
-    def _read_cama_output(self, exp_dir: Path, cama: Dict[str, Any]) -> List[float]:
+    def _read_cama_output(self, exp_dir: Path, cama: Dict[str, Any]) -> Dict[dt.date, float]:
         """Read daily streamflow at the outlet cell from the per-year NetCDF
-        outputs (`o_outflw<YYYY>.nc`, LOUTCDF=.TRUE.), concatenated in order.
+        outputs (`o_outflw<YYYY>.nc`, LOUTCDF=.TRUE.), keyed by calendar date.
 
         Files are float32 grids shaped [time, nY, nX]; the outlet is the
-        0-indexed (iy=row, ix=col) cell from the basin's station_info.
+        0-indexed (iy=row, ix=col) cell from the basin's station_info. Each
+        yearly file starts on Jan 1 of its year (SDAYIN=1, IFRQ_OUT=24 daily),
+        so dates are derived per file — a missing year cannot shift the rest.
         """
         try:
             import numpy as np
@@ -863,30 +910,36 @@ class VICCamaFloodExecutor(ModelExecutor):
         except ImportError:
             raise RuntimeError("numpy + netCDF4 required to read CaMa-Flood output") from None
 
-        # Evaluate from eval_start_year onward (skip the 2000 spin-up year).
+        # Evaluate only [eval_start_year, eval_end_year]: spin-up years before
+        # eval_start and post-evaluation years after eval_end are excluded.
         import re
         eval_start = int(cama.get("eval_start_year", cama.get("start_year", 0)))
+        eval_end = int(cama.get("eval_end_year", cama.get("end_year", 9999)))
         files = []
         for f in sorted(exp_dir.glob("o_outflw*.nc")):
             m = re.search(r"o_outflw(\d{4})", f.name)
-            if m and int(m.group(1)) < eval_start:
-                continue  # spin-up year — exclude from evaluation
-            files.append(f)
+            if m and not (eval_start <= int(m.group(1)) <= eval_end):
+                continue  # outside the evaluation window
+            if m:
+                files.append((f, int(m.group(1))))
         if not files:
-            raise FileNotFoundError(f"no o_outflw*.nc (>= {eval_start}) in {exp_dir}")
+            raise FileNotFoundError(
+                f"no o_outflw*.nc within [{eval_start}, {eval_end}] in {exp_dir}")
 
         outlet = cama.get("outlet", {})
         ix = int(outlet["ix"])  # 0-indexed cell column (lon)
         iy = int(outlet["iy"])  # 0-indexed cell row (lat, from north)
 
-        series: List[float] = []
-        for f in files:
+        series: Dict[dt.date, float] = {}
+        for f, year in files:
             d = nc.Dataset(str(f))
             vname = "outflw" if "outflw" in d.variables else \
                 next(k for k in d.variables if "outflw" in k.lower())
             arr = np.array(d.variables[vname][:])  # (time, nY, nX)
             d.close()
-            series.extend(float(v) for v in arr[:, iy, ix])
+            day0 = dt.date(year, 1, 1)
+            for i in range(arr.shape[0]):
+                series[day0 + dt.timedelta(days=i)] = float(arr[i, iy, ix])
         return series
 
     @staticmethod
@@ -896,28 +949,51 @@ class VICCamaFloodExecutor(ModelExecutor):
             nYY = int(f.readline().split()[0])
         return nXX, nYY
 
-    def _read_observations(self, cama: Dict[str, Any]) -> List[float]:
-        """Load daily observed streamflow over the calibration window."""
+    def _read_observations(
+        self, cama: Dict[str, Any],
+    ) -> Union[Dict[dt.date, float], List[float]]:
+        """Load daily observed streamflow over the calibration window.
+
+        Returns a date-keyed dict when the CSV has a parseable date column so
+        metrics can inner-join sim and obs by calendar date (obs gaps then
+        cannot shift the pairing). Falls back to a bare value list — positional
+        alignment — only when no dates can be parsed.
+        """
         try:
             import pandas as pd
         except ImportError:
             raise RuntimeError("pandas required to load observation CSV") from None
         obs_file = Path(cama["obs_file"])
         df = pd.read_csv(obs_file)
-        # Slice to the evaluation window [eval_start_year, end_year] (spin-up
-        # year 2000 excluded). Obs CSV is a continuous daily series so it aligns
-        # positionally with the sim read over the same years.
+        # Slice to the evaluation window [eval_start_year, eval_end_year]
+        # (spin-up excluded; upper bound never past the simulation end_year).
         eval_start = int(cama.get("eval_start_year", cama.get("start_year", 0)))
-        if "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"])
-            df = df[(df["date"].dt.year >= eval_start) &
-                    (df["date"].dt.year <= cama["end_year"])]
+        eval_end = min(int(cama.get("eval_end_year", cama.get("end_year", 9999))),
+                       int(cama.get("end_year", 9999)))
         q_col = "Q" if "Q" in df.columns else df.columns[-1]
+        date_col = next((c for c in ("date", "dates") if c in df.columns), None)
+        if date_col is not None:
+            dates = pd.to_datetime(df[date_col], errors="coerce")
+            if dates.notna().any():
+                sub = df.loc[dates.notna()].copy()
+                sub[date_col] = dates[dates.notna()]
+                sub = sub[(sub[date_col].dt.year >= eval_start) &
+                          (sub[date_col].dt.year <= eval_end)]
+                # Defensive: drop duplicate dates (keep first); dict keying
+                # makes ordering irrelevant, so unsorted obs is fine.
+                sub = sub.drop_duplicates(subset=date_col)
+                return {ts.date(): float(v)
+                        for ts, v in zip(sub[date_col], sub[q_col].astype(float))}
+        logger.warning(
+            "obs file %s has no parseable dates; date alignment unavailable, "
+            "falling back to positional sim/obs pairing", obs_file)
         return df[q_col].astype(float).tolist()
 
     @staticmethod
-    def _save_sim_hydrograph(exp_dir: Path, cama: Dict[str, Any],
-                             sim: List[float], obs: List[float]) -> None:
+    def _save_sim_hydrograph(exp_dir: Path,
+                             sim: Dict[dt.date, float],
+                             obs: Union[Dict[dt.date, float], List[float]],
+                             ) -> None:
         """Write the outlet daily simulated (and observed) discharge for this
         round to exp_dir/sim_outlet.csv over the evaluation window. This is the
         per-round simulated flow we retain; copy_routing_artifacts copies it
@@ -926,34 +1002,66 @@ class VICCamaFloodExecutor(ModelExecutor):
             import pandas as pd
         except ImportError:
             return
-        eval_start = int(cama.get("eval_start_year", cama.get("start_year", 2001)))
-        eyear = int(cama.get("end_year", eval_start))
-        idx = pd.date_range(f"{eval_start}-01-01", f"{eyear}-12-31", freq="D")
-        n = min(len(idx), len(sim))
-        df = pd.DataFrame({"date": idx[:n].strftime("%Y-%m-%d"),
-                           "Q_sim": [round(float(v), 4) for v in sim[:n]]})
+        if not sim:
+            return
+        dates = sorted(sim)
+        df = pd.DataFrame({"date": [d.strftime("%Y-%m-%d") for d in dates],
+                           "Q_sim": [round(float(sim[d]), 4) for d in dates]})
         if obs:
-            m = min(n, len(obs))
-            qobs = [None] * n
-            for i in range(m):
-                qobs[i] = round(float(obs[i]), 4)
-            df["Q_obs"] = qobs
+            if isinstance(obs, dict):
+                df["Q_obs"] = [round(float(obs[d]), 4) if d in obs else None
+                               for d in dates]
+            else:  # dateless obs list: positional pairing (best effort)
+                m = min(len(dates), len(obs))
+                qobs = [None] * len(dates)
+                for i in range(m):
+                    qobs[i] = round(float(obs[i]), 4)
+                df["Q_obs"] = qobs
         df.to_csv(exp_dir / "sim_outlet.csv", index=False)
 
     @staticmethod
-    def _compute_metrics(sim: List[float], obs: List[float]) -> Dict[str, float]:
+    def _compute_metrics(sim: Dict[dt.date, float],
+                         obs: Union[Dict[dt.date, float], List[float]],
+                         ) -> Dict[str, float]:
         try:
             import numpy as np
         except ImportError:
             raise RuntimeError("numpy required to compute metrics") from None
+        from .. import vic_runner
 
-        n = min(len(sim), len(obs))
-        if n == 0:
-            return _nan_metrics()
-        s = np.asarray(sim[:n], dtype="float64")
-        o = np.asarray(obs[:n], dtype="float64")
+        monthly = isinstance(obs, dict) and vic_runner.is_monthly_obs(obs)
+        if monthly:
+            # Monthly obs (every date on day 1): aggregate the daily sim to
+            # monthly means (non-finite days excluded) so the date join below
+            # pairs by (year, month) instead of against day-1 sim values.
+            sim = vic_runner.aggregate_sim_to_monthly(sim)
+        if isinstance(obs, dict):
+            # Inner join on calendar date (same pairing as vic_runner): obs
+            # gaps or mismatched windows cannot shift the sim/obs pairing, and
+            # peak timing compares genuinely co-registered days.
+            dates = sorted(set(sim) & set(obs))
+            if not dates:
+                return _nan_metrics()
+            s = np.asarray([sim[d] for d in dates], dtype="float64")
+            o = np.asarray([obs[d] for d in dates], dtype="float64")
+        else:
+            # Dateless obs list: positional fallback (warned at read time).
+            dates = None
+            sim_vals = [sim[d] for d in sorted(sim)]
+            n = min(len(sim_vals), len(obs))
+            if n == 0:
+                return _nan_metrics()
+            s = np.asarray(sim_vals[:n], dtype="float64")
+            o = np.asarray(obs[:n], dtype="float64")
+        # Finite mask AFTER date alignment; timing uses the same masked set
+        # as NSE.
         mask = np.isfinite(s) & np.isfinite(o)
         s, o = s[mask], o[mask]
+        if dates is not None:
+            # Keep the date axis aligned with the masked arrays: the joined
+            # series may have calendar gaps, so peak timing must be measured
+            # in calendar days, not array indices.
+            dates = [d for d, keep in zip(dates, mask) if keep]
         if s.size == 0:
             return _nan_metrics()
 
@@ -970,15 +1078,23 @@ class VICCamaFloodExecutor(ModelExecutor):
         low_sim = float(np.percentile(s, 10))
         lowflow_ratio = low_sim / max(low_obs, 1e-9)
 
-        return {
+        metrics = {
             "NSE": nse,
             "KGE": _kge(s, o),
             "RMSE": rmse,
             "PBIAS": pbias,
             "peak_ratio": peak_ratio,
             "lowflow_ratio": lowflow_ratio,
-            "peak_timing_bias_days": 0.0,  # could be extracted from peak-day alignment
+            # Peak timing is meaningless on monthly means (one index step is
+            # one month), so emit NaN there.
+            "peak_timing_bias_days": float("nan") if monthly else
+            vic_runner._peak_timing_bias(s, o, dates=dates),
         }
+        if monthly:
+            # Tag only the monthly branch: worker_diagnostics defaults an
+            # absent tag to daily, and the daily output must stay identical.
+            metrics["timestep"] = "monthly"
+        return metrics
 
 
 # ---------------------------------------------------------------------------

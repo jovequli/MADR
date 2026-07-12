@@ -13,8 +13,8 @@
     "mode": "real"
   },
   "outlet_subbasin_id": "bengbu",
-  "vic_exe": "/Users/yc/cowork/framework/model/VIC-5.1.0/vic/drivers/classic/vic_classic.exe",
-  "rout_exe": "/Users/yc/cowork/framework/model/route_1.0/src/rout",
+  "vic_exe": "/path/to/vic_classic",
+  "rout_exe": "/path/to/lohmann/rout",
   "objective_weights": {
     "mean_nse": 0.9,
     "consistency": 0.1
@@ -110,73 +110,73 @@
       "subbasin_id": "xixian",
       "station_code": "XX",
       "memory_window": 5,
-      "obs_file": "/Users/yc/cowork/framework/data/obs/XX/51012-2-xixian.txt",
+      "obs_file": "/path/to/observations/xixian.txt",
       "neighbors_downstream": [
         "wangjiaba"
       ],
       "is_outlet": false,
-      "soil_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/xixian_1980-1990_025deg/vic_temp/soil/SOIL_PARAM_COMPLETE.txt",
-      "global_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/xixian_1980-1990_025deg/vic_temp/global_param_xixian_1980-1990_025deg.txt",
-      "rout_template_dir": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/xixian_1980-1990_025deg/routing_param",
-      "rout_exe": "/Users/yc/cowork/framework/model/route_1.0/src/rout"
+      "soil_base": "/path/to/model_inputs/xixian/SOIL_PARAM_COMPLETE.txt",
+      "global_base": "/path/to/model_inputs/xixian/global_param.txt",
+      "rout_template_dir": "/path/to/model_inputs/xixian/routing_param",
+      "rout_exe": "/path/to/lohmann/rout"
     },
     {
       "agent_id": "worker_wangjiaba",
       "subbasin_id": "wangjiaba",
       "station_code": "WJB",
       "memory_window": 5,
-      "obs_file": "/Users/yc/cowork/framework/data/obs/WJB/HUAIH-51030-wangjiaba.txt",
+      "obs_file": "/path/to/observations/wangjiaba.txt",
       "neighbors_downstream": [
         "bengbu"
       ],
       "is_outlet": false,
-      "soil_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/wangjiaba_1980-1990_025deg/vic_temp/soil/SOIL_PARAM_COMPLETE.txt",
-      "global_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/wangjiaba_1980-1990_025deg/vic_temp/global_param_wangjiaba_1980-1990_025deg.txt",
-      "rout_template_dir": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/wangjiaba_1980-1990_025deg/routing_param",
-      "rout_exe": "/Users/yc/cowork/framework/model/route_1.0/src/rout"
+      "soil_base": "/path/to/model_inputs/wangjiaba/SOIL_PARAM_COMPLETE.txt",
+      "global_base": "/path/to/model_inputs/wangjiaba/global_param.txt",
+      "rout_template_dir": "/path/to/model_inputs/wangjiaba/routing_param",
+      "rout_exe": "/path/to/lohmann/rout"
     },
     {
       "agent_id": "worker_jiangjiaji",
       "subbasin_id": "jiangjiaji",
       "station_code": "JJJ",
       "memory_window": 5,
-      "obs_file": "/Users/yc/cowork/framework/data/obs/JJJ/HUAIH-51590-jiangjiaji.txt",
+      "obs_file": "/path/to/observations/jiangjiaji.txt",
       "neighbors_downstream": [
         "bengbu"
       ],
       "is_outlet": false,
-      "soil_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/jiangjiaji_1980-1990_025deg/vic_temp/soil/SOIL_PARAM_COMPLETE.txt",
-      "global_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/jiangjiaji_1980-1990_025deg/vic_temp/global_param_jiangjiaji_1980-1990_025deg.txt",
-      "rout_template_dir": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/jiangjiaji_1980-1990_025deg/routing_param",
-      "rout_exe": "/Users/yc/cowork/framework/model/route_1.0/src/rout"
+      "soil_base": "/path/to/model_inputs/jiangjiaji/SOIL_PARAM_COMPLETE.txt",
+      "global_base": "/path/to/model_inputs/jiangjiaji/global_param.txt",
+      "rout_template_dir": "/path/to/model_inputs/jiangjiaji/routing_param",
+      "rout_exe": "/path/to/lohmann/rout"
     },
     {
       "agent_id": "worker_zhoukou",
       "subbasin_id": "zhoukou",
       "station_code": "ZK",
       "memory_window": 5,
-      "obs_file": "/Users/yc/cowork/framework/data/obs/ZK/HUAIH-51760-zhoukou.txt",
+      "obs_file": "/path/to/observations/zhoukou.txt",
       "neighbors_downstream": [
         "bengbu"
       ],
       "is_outlet": false,
-      "soil_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/zhoukou_1980-1990_025deg/vic_temp/soil/SOIL_PARAM_COMPLETE.txt",
-      "global_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/zhoukou_1980-1990_025deg/vic_temp/global_param_zhoukou_1980-1990_025deg.txt",
-      "rout_template_dir": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/zhoukou_1980-1990_025deg/routing_param",
-      "rout_exe": "/Users/yc/cowork/framework/model/route_1.0/src/rout"
+      "soil_base": "/path/to/model_inputs/zhoukou/SOIL_PARAM_COMPLETE.txt",
+      "global_base": "/path/to/model_inputs/zhoukou/global_param.txt",
+      "rout_template_dir": "/path/to/model_inputs/zhoukou/routing_param",
+      "rout_exe": "/path/to/lohmann/rout"
     },
     {
       "agent_id": "worker_bengbu",
       "subbasin_id": "bengbu",
       "station_code": "BB",
       "memory_window": 5,
-      "obs_file": "/Users/yc/cowork/framework/data/obs/BB/51080_bengbu.txt",
+      "obs_file": "/path/to/observations/bengbu.txt",
       "neighbors_downstream": [],
       "is_outlet": true,
-      "soil_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/bengbu_1980-1990_025deg/vic_temp/soil/SOIL_PARAM_COMPLETE.txt",
-      "global_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/bengbu_1980-1990_025deg/vic_temp/global_param_bengbu_1980-1990_025deg.txt",
-      "rout_template_dir": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/bengbu_1980-1990_025deg/routing_param",
-      "rout_exe": "/Users/yc/cowork/framework/model/route_1.0/src/rout"
+      "soil_base": "/path/to/model_inputs/bengbu/SOIL_PARAM_COMPLETE.txt",
+      "global_base": "/path/to/model_inputs/bengbu/global_param.txt",
+      "rout_template_dir": "/path/to/model_inputs/bengbu/routing_param",
+      "rout_exe": "/path/to/lohmann/rout"
     }
   ],
   "initial_exploration": {

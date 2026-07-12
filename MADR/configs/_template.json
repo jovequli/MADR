@@ -1,6 +1,6 @@
 {
   "_comment": "MADR config TEMPLATE — annotated reference showing every top-level field. Copy and adapt for your own runs. Comments here document what each field does.",
-  "_path_replacement_notice": "All absolute paths in this config (vic_exe, rout_exe, swatplus_exe, and each worker's obs_file/soil_base/global_base/rout_template_dir/etc.) are placeholders from the author's local setup. REPLACE them with your own local paths before running.",
+  "_path_replacement_notice": "All /path/to/... values are placeholders. Replace them with paths from your own model installation and dataset before running.",
   "run_name": "your_run_name_here",
   "model_combination": "vic_routing",
   "_doc_model_combination": "Selects executor + prompts/. One of: vic_routing | vic_cama_flood | swat. Defaults to vic_routing for backward compatibility.",
@@ -12,6 +12,11 @@
     "start_year": 1980,
     "end_year": 1990
   },
+  "evaluation_period": {
+    "start_year": 1981,
+    "end_year": 1990
+  },
+  "_doc_evaluation_period": "Optional metric window inside simulation_period. Use it to exclude spin-up years. ISO start_date/end_date are also accepted.",
   "model_binding": {
     "mode": "real"
   },
@@ -24,8 +29,10 @@
     "mean_nse": 0.9,
     "consistency": 0.1
   },
+  "mc_selection_metric": "mean_nse",
+  "_doc_mc_selection_metric": "mean_nse or j_total. SWAT+ should normally use j_total so every accepted strategy and cross-round center is one watershed-level joint bundle.",
   "phase_config": {
-    "_doc": "Per-phase max_rounds (hard cap) and patience_rounds (early termination when in-phase mean NSE plateaus for N consecutive single-candidate rounds). Omit patience_rounds (or set to 999) to disable early termination and reproduce the paper's fixed-budget runs.",
+    "_doc": "Per-phase hard caps and patience. VIC-based combinations track in-phase mean NSE; SWAT+ tracks acceptance of the configured watershed-level joint objective. Multi-candidate rounds do not increment patience. Set patience_rounds to 999 to force the full phase budget.",
     "pipeline": [
       {
         "name": "VIC_ONLY",
@@ -70,7 +77,7 @@
     "n_random": 40
   },
   "leader": {
-    "_doc": "Leader LLM config. Provider auto-inferred from model name if not set.",
+    "_doc": "Leader LLM config. The values below are one tested API example, not a restriction on other API-accessible models or compatible endpoints.",
     "agent_id": "leader_outlet",
     "model": "claude-sonnet-4-6",
     "provider": "anthropic",

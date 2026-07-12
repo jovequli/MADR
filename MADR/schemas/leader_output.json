@@ -1,12 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "LeaderRoundDecision",
-  "description": "Leader LLM output after reviewing all worker results for one round.",
+  "description": "Leader LLM output after reviewing all worker results for one round. round_id and stop_or_continue are optional in LLM output: the harness injects/normalizes them after parsing.",
   "type": "object",
+  "additionalProperties": false,
   "required": [
-    "round_id",
     "overall_assessment",
-    "stop_or_continue",
     "worker_guidance"
   ],
   "properties": {
@@ -20,12 +19,14 @@
     },
     "global_score_trend": {
       "type": "string",
-      "enum": ["improving", "plateauing", "declining"],
-      "description": "Trend of the global objective across recent rounds."
+      "description": "Free-text trend label, e.g. improving / plateauing / declining. No enum: synonyms are accepted; the value is informational."
     },
     "stop_or_continue": {
       "type": "string",
-      "enum": ["continue", "stop"],
+      "enum": [
+        "continue",
+        "stop"
+      ],
       "description": "Whether to proceed to the next round or stop."
     },
     "stop_reason": {
@@ -37,6 +38,7 @@
       "description": "Per-worker guidance for the next round.",
       "items": {
         "type": "object",
+        "additionalProperties": false,
         "required": [
           "subbasin_id",
           "priority_focus",
@@ -56,20 +58,34 @@
             "description": "Suggested direction for each parameter.",
             "items": {
               "type": "object",
-              "required": ["param", "direction", "magnitude"],
+              "additionalProperties": false,
+              "required": [
+                "param",
+                "direction",
+                "magnitude"
+              ],
               "properties": {
                 "param": {
                   "type": "string",
-                  "enum": ["binfilt", "Ds", "Dsmax", "Ws", "soil_d2", "soil_d3", "velocity", "diffusivity"]
+                  "description": "Parameter name. Valid names depend on the active model combination (vic_routing, vic_cama_flood, swat) and are validated per combination by param_validator.validate_leader_output."
                 },
                 "direction": {
                   "type": "string",
-                  "enum": ["increase", "decrease", "hold"],
+                  "enum": [
+                    "increase",
+                    "decrease",
+                    "hold"
+                  ],
                   "description": "Direction of adjustment."
                 },
                 "magnitude": {
                   "type": "string",
-                  "enum": ["large", "medium", "small", "none"],
+                  "enum": [
+                    "large",
+                    "medium",
+                    "small",
+                    "none"
+                  ],
                   "description": "Relative magnitude of adjustment."
                 },
                 "reasoning": {
@@ -81,7 +97,13 @@
           },
           "search_radius_hint": {
             "type": "string",
-            "enum": ["shrink", "expand", "keep"],
+            "enum": [
+              "shrink",
+              "expand",
+              "keep",
+              "hold",
+              "maintain"
+            ],
             "description": "Whether to shrink, expand, or keep the search radius for this worker."
           }
         }
@@ -89,7 +111,10 @@
     },
     "phase_recommendation": {
       "type": "string",
-      "enum": ["stay", "advance"],
+      "enum": [
+        "stay",
+        "advance"
+      ],
       "description": "Whether to stay in the current calibration phase or advance to the next phase. Set 'advance' when current phase parameters have converged. Only relevant during VIC_ONLY and ROUTING_ONLY phases."
     },
     "next_round_strategy": {

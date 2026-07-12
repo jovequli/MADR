@@ -20,6 +20,7 @@ from .param_validator import (
     PARAM_KEYS,
     SOIL_PARAM_KEYS,
     ROUTING_PARAM_KEYS,
+    SWAT_PARAM_KEYS,
     DEFAULT_RANGES,
     CalibrationPhase,
     get_tunable_keys,
@@ -51,6 +52,10 @@ def _load_json(path: Path) -> Dict:
 # ---------------------------------------------------------------------------
 # Worker memory (sliding window)
 # ---------------------------------------------------------------------------
+
+# History-table windowing: keep baseline + best + recent rows, cap total rows.
+MAX_HISTORY_ROWS = 15
+
 
 class WorkerMemory:
     """Sliding-window history for a worker agent."""
@@ -84,26 +89,89 @@ class WorkerMemory:
             "worker_analysis": worker_analysis,
         })
 
-    def format_full_history_table(self, phase: str = "VIC_ONLY") -> str:
-        """Format ALL rounds as a compact table.
+    def _windowed_history(self) -> Tuple[List[Dict[str, Any]], str]:
+        """Window history rows: baseline + best + recent, capped at MAX_HISTORY_ROWS.
 
-        Header depends on phase:
-        - VIC_ONLY: 6 soil params (routing locked at defaults)
-        - ROUTING_ONLY: 2 routing params (soil locked at VIC's best)
-        - JOINT: all 8 params (fine-tuning everything)
+        Returns (entries, omission_note); note is "" when nothing is omitted.
+        """
+        if len(self.history) <= MAX_HISTORY_ROWS:
+            return list(self.history), ""
+
+        def _nse(entry):
+            v = entry.get("metrics", {}).get("NSE")
+            try:
+                f = float(v)
+                return f if f == f else float("-inf")  # NaN -> -inf
+            except (ValueError, TypeError):
+                return float("-inf")
+
+        best_idx = max(range(len(self.history)), key=lambda i: _nse(self.history[i]))
+        n_recent = MAX_HISTORY_ROWS - 2
+        keep = {0, best_idx} | set(range(len(self.history) - n_recent, len(self.history)))
+        kept = [self.history[i] for i in sorted(keep)]
+        omitted = len(self.history) - len(kept)
+        note = f"[{omitted} middle rounds omitted; showing baseline + best + last {n_recent}]"
+        return kept, note
+
+    def _swat_varied_cols(self) -> Tuple[List[Tuple[str, str, str, Any]], str]:
+        """Pick SWAT param columns: only params that VARIED across history.
+
+        Capped at 10 columns, most-varied first. Returns (cols, header_note);
+        the note names params hidden because they never changed.
+        """
+        keys = [k for k in SWAT_PARAM_KEYS
+                if any(k in e.get("params", {}) for e in self.history)]
+        if not keys:
+            keys = list(SWAT_PARAM_KEYS)
+
+        def _n_distinct(k):
+            vals = set()
+            for e in self.history:
+                v = e.get("params", {}).get(k)
+                try:
+                    vals.add(format(float(v), ".6g"))
+                except (ValueError, TypeError):
+                    vals.add("?")
+            return len(vals)
+
+        distinct = {k: _n_distinct(k) for k in keys}
+        varied = sorted(
+            [k for k in keys if distinct[k] > 1],
+            key=lambda k: (-distinct[k], keys.index(k)),
+        )
+        shown = varied[:10] if varied else keys[:10]
+        hidden_static = [k for k in keys if distinct[k] <= 1 and k not in shown]
+        notes = []
+        if hidden_static:
+            notes.append("hidden (never changed): " + ", ".join(hidden_static))
+        if len(varied) > 10:
+            notes.append("hidden (over 10-column cap): " + ", ".join(varied[10:]))
+        note = "[" + "; ".join(notes) + "]" if notes else ""
+        cols = [(k, k, ".3g", None) for k in shown]
+        return cols, note
+
+    def format_full_history_table(
+        self,
+        phase: str = "VIC_ONLY",
+        model_combination: str = "vic_routing",
+    ) -> str:
+        """Format history rounds as a compact table (combination-aware).
+
+        Columns per combination x phase:
+        - vic_routing:    VIC_ONLY -> 6 soil, ROUTING_ONLY -> vel/diff, JOINT -> all 8
+        - vic_cama_flood: VIC_ONLY -> 6 soil, CAMA_FLOOD_ONLY -> Hc/Hmin/Wc/Wmin,
+                          JOINT -> all 10
+        - swat:           SWATPLUS_HRU/JOINT -> SWAT params that varied across
+                          history (capped at 10 columns, most-varied first)
+
+        Long histories are windowed (baseline + best + recent, MAX_HISTORY_ROWS).
         """
         if not self.history:
             return "(no history yet)"
 
         import re
         phase_upper = phase.upper() if isinstance(phase, str) else str(phase)
-
-        if phase_upper == "ROUTING_ONLY":
-            header = "R|vel|diff|NSE|PBIAS|peak_r|timing|note"
-        elif phase_upper == "JOINT":
-            header = "R|binfilt|Ds|Dsmax|Ws|d2|d3|vel|diff|NSE|PBIAS|peak_r|lowflow|timing|note"
-        else:
-            header = "R|binfilt|Ds|Dsmax|Ws|d2|d3|NSE|PBIAS|peak_r|lowflow|note"
+        combo = (model_combination or "vic_routing").lower()
 
         def _f(v, fmt):
             """Safe float format, returns '?' for None/NaN."""
@@ -117,15 +185,70 @@ class WorkerMemory:
             except (ValueError, TypeError):
                 return "?"
 
+        # Column specs: (label, param key, fmt, default-when-missing)
+        soil_cols = [
+            ("binfilt", "binfilt", ".3f", None),
+            ("Ds", "Ds", ".4f", None),
+            ("Dsmax", "Dsmax", ".1f", None),
+            ("Ws", "Ws", ".2f", None),
+            ("d2", "soil_d2", ".2f", None),
+            ("d3", "soil_d3", ".2f", None),
+        ]
+        rout_cols = [
+            ("vel", "velocity", ".2f", 1.5),
+            ("diff", "diffusivity", ".0f", 800),
+        ]
+        cama_cols = [(k, k, ".2f", None) for k in ("Hc", "Hmin", "Wc", "Wmin")]
+        # Metric specs: (label, metric key, fmt)
+        m_base = [
+            ("NSE", "NSE", ".3f"),
+            ("PBIAS", "PBIAS", ".1f"),
+            ("peak_r", "peak_ratio", ".2f"),
+        ]
+        m_lowflow = ("lowflow", "lowflow_ratio", ".1f")
+        m_timing = ("timing", "peak_timing_bias_days", ".1f")
+
+        header_note = ""
+        if combo == "vic_cama_flood":
+            if phase_upper == "CAMA_FLOOD_ONLY":
+                param_cols = cama_cols
+                metric_cols = m_base + [m_timing]
+            elif phase_upper == "JOINT":
+                param_cols = soil_cols + cama_cols
+                metric_cols = m_base + [m_lowflow, m_timing]
+            else:  # VIC_ONLY
+                param_cols = soil_cols
+                metric_cols = m_base + [m_lowflow]
+        elif combo == "swat":
+            # Single-phase SWATPLUS_HRU (JOINT alias included).
+            param_cols, header_note = self._swat_varied_cols()
+            metric_cols = m_base + [m_lowflow]
+        else:  # vic_routing — legacy headers/rows preserved byte-identically
+            if phase_upper == "ROUTING_ONLY":
+                param_cols = rout_cols
+                metric_cols = m_base + [m_timing]
+            elif phase_upper == "JOINT":
+                param_cols = soil_cols + rout_cols
+                metric_cols = m_base + [m_lowflow, m_timing]
+            else:
+                param_cols = soil_cols
+                metric_cols = m_base + [m_lowflow]
+
+        header = "|".join(
+            ["R"] + [c[0] for c in param_cols] + [c[0] for c in metric_cols] + ["note"]
+        )
+
+        entries, window_note = self._windowed_history()
+
         lines = [header]
-        for entry in self.history:
+        if header_note:
+            lines.append(header_note)
+        if window_note:
+            lines.append(window_note)
+        for entry in entries:
             rid = entry["round_id"]
             p = entry.get("params", {})
             m = entry["metrics"]
-
-            nse_s = _f(m.get("NSE"), ".3f")
-            pb_s = _f(m.get("PBIAS"), ".1f")
-            pr_s = _f(m.get("peak_ratio"), ".2f")
 
             # MC annotation
             analysis = entry.get("worker_analysis", "")
@@ -136,29 +259,11 @@ class WorkerMemory:
             elif rid == 1:
                 note = "default"
 
-            if phase_upper == "ROUTING_ONLY":
-                vel = _f(p.get("velocity", 1.5), ".2f")
-                diff = _f(p.get("diffusivity", 800), ".0f")
-                t_s = _f(m.get("peak_timing_bias_days"), ".1f")
-                lines.append(f"{rid}|{vel}|{diff}|{nse_s}|{pb_s}|{pr_s}|{t_s}|{note}")
-            elif phase_upper == "JOINT":
-                lf_s = _f(m.get("lowflow_ratio"), ".1f")
-                t_s = _f(m.get("peak_timing_bias_days"), ".1f")
-                lines.append(
-                    f"{rid}|{_f(p.get('binfilt'), '.3f')}|{_f(p.get('Ds'), '.4f')}|"
-                    f"{_f(p.get('Dsmax'), '.1f')}|{_f(p.get('Ws'), '.2f')}|"
-                    f"{_f(p.get('soil_d2'), '.2f')}|{_f(p.get('soil_d3'), '.2f')}|"
-                    f"{_f(p.get('velocity', 1.5), '.2f')}|{_f(p.get('diffusivity', 800), '.0f')}|"
-                    f"{nse_s}|{pb_s}|{pr_s}|{lf_s}|{t_s}|{note}"
-                )
-            else:
-                lf_s = _f(m.get("lowflow_ratio"), ".1f")
-                lines.append(
-                    f"{rid}|{_f(p.get('binfilt'), '.3f')}|{_f(p.get('Ds'), '.4f')}|"
-                    f"{_f(p.get('Dsmax'), '.1f')}|{_f(p.get('Ws'), '.2f')}|"
-                    f"{_f(p.get('soil_d2'), '.2f')}|{_f(p.get('soil_d3'), '.2f')}|"
-                    f"{nse_s}|{pb_s}|{pr_s}|{lf_s}|{note}"
-                )
+            parts = [str(rid)]
+            parts += [_f(p.get(key, default), fmt) for _, key, fmt, default in param_cols]
+            parts += [_f(m.get(key), fmt) for _, key, fmt in metric_cols]
+            parts.append(note)
+            lines.append("|".join(parts))
         return "\n".join(lines)
 
     def to_checkpoint(self) -> Dict:
@@ -203,6 +308,9 @@ class WorkerAgent:
         param_ranges: Optional[Dict[str, list]] = None,
         window_size: int = 5,
         model_combination: Optional[str] = None,
+        topology_note: str = "",
+        n_basins: Optional[int] = None,
+        outlet_id: str = "",
         **kwargs,
     ):
         self.agent_id = agent_id
@@ -226,6 +334,12 @@ class WorkerAgent:
         self.ledger = WorkerLedger(output_dir=self.output_dir, subbasin_id=subbasin_id)
         self.executor = WorkerExecutor(param_ranges=self.ranges)
         self._last_diagnosis: Optional[DiagnosisResult] = None
+        # SWAT joint runs: the batch node sets this to the accepted joint
+        # bundle's provenance for this station ({"round_id", "nse"}) each
+        # round, so the prompt anchors "trial A" on the bundle instead of
+        # the per-station ledger best. None (vic combos, resumed pre-bundle
+        # checkpoints) keeps the legacy ledger-based labels.
+        self._bundle_anchor: Optional[Dict[str, Any]] = None
 
         # Resolve the prompts directory for the active model combination.
         prompts_dir = resolve_prompts_dir(model_combination)
@@ -234,6 +348,24 @@ class WorkerAgent:
         # Load compact prompts (ZoneAgent style)
         self.system_prompt = _load_text(prompts_dir / "worker_system.md")
         self.propose_template = _load_text(prompts_dir / "worker_propose.md")
+
+        # Append parameter knowledge if available
+        param_knowledge_path = prompts_dir / "param_knowledge_worker.md"
+        if param_knowledge_path.exists():
+            self.system_prompt += "\n\n" + _load_text(param_knowledge_path)
+
+        # Substitute topology placeholders in the system prompt (same
+        # contract as LeaderAgent). str.replace is a no-op for files without
+        # the tokens; when no topology info was provided, tokens collapse to
+        # a generic pointer sentence.
+        generic = ("The basin set and routing topology for this run "
+                   "are given in the round context.")
+        for token, value in (
+            ("{{BASIN_TOPOLOGY}}", topology_note or generic),
+            ("{{N_BASINS}}", str(n_basins) if n_basins is not None else generic),
+            ("{{OUTLET_ID}}", outlet_id or generic),
+        ):
+            self.system_prompt = self.system_prompt.replace(token, value)
 
     # ------------------------------------------------------------------
     # NEW: LLM-driven parameter proposal (ZoneAgent style)
@@ -356,7 +488,16 @@ class WorkerAgent:
                     candidate[param] = clamp(float(value), lo, hi)
 
             # Enforce phase locks (enforce_phase_locks expects List[Dict])
-            locked_list = enforce_phase_locks([candidate], phase, current_center)
+            try:
+                phase_arg = phase if isinstance(phase, CalibrationPhase) else CalibrationPhase(str(phase).upper())
+                locked_list = enforce_phase_locks(
+                    [candidate], phase_arg, current_center,
+                    model_combination=self.model_combination,
+                )
+            except (TypeError, ValueError):
+                # Validator without model_combination support, or unknown
+                # phase string: legacy combination-agnostic call.
+                locked_list = enforce_phase_locks([candidate], phase, current_center)
             candidate = locked_list[0]
 
             # Enforce hard constraints: soil_d3 > soil_d2
@@ -410,21 +551,68 @@ class WorkerAgent:
 
         # ── Diagnosis block (~60 tokens) ──
         diagnosis = self._last_diagnosis
+        best_record = self.ledger.get_best_params()
+        # Trial-A provenance: with a joint bundle anchor, the center is the
+        # accepted bundle's params (centers only move on whole-bundle
+        # acceptance), so trial A is the BUNDLE round; the ledger best may
+        # be a locally-better round whose bundle was rejected watershed-wide.
+        anchor = getattr(self, "_bundle_anchor", None)
         if diagnosis:
+            if anchor is not None:
+                best_rid = anchor.get("round_id")
+            else:
+                best_rid = best_record.get("round_id") if best_record else None
+            last_rid = self.memory.history[-1]["round_id"] if self.memory.history else None
+            a_label = f"trial A, round {best_rid}" if best_rid is not None else "trial A"
+            b_label = f"trial B, round {last_rid}" if last_rid is not None else "trial B"
+            # Responsibility label per model combination (SWAT+ has no
+            # land/routing split — routing is internal to the model).
+            if self.model_combination == "swat":
+                resp_label = "Model: SWAT+ (integrated land+channel)"
+            elif self.model_combination == "vic_cama_flood":
+                resp_label = (
+                    f"VIC={diagnosis.vic_responsibility:.0%} "
+                    f"CaMa={diagnosis.routing_responsibility:.0%}"
+                )
+            else:
+                resp_label = (
+                    f"VIC={diagnosis.vic_responsibility:.0%} "
+                    f"Rout={diagnosis.routing_responsibility:.0%}"
+                )
+            if anchor is not None:
+                center_line = f"Current center params = accepted joint bundle ({a_label}). "
+            else:
+                center_line = f"Current center params = historical best ({a_label}). "
             diag_block = (
-                f"Issue: {diagnosis.primary_issue} ({diagnosis.severity}), "
-                f"VIC={diagnosis.vic_responsibility:.0%} Rout={diagnosis.routing_responsibility:.0%}\n"
+                center_line
+                + f"The diagnosis below describes the most recent trial ({b_label}), which may differ from A.\n"
+                "Use B to avoid repeating B's mistake; do not treat B's diagnosis as describing A.\n"
+                f"Issue: {diagnosis.primary_issue} ({diagnosis.severity}), {resp_label}\n"
                 f"{diagnosis.reasoning[:120]}"
             )
+            if (anchor is not None and best_record
+                    and best_record.get("round_id") != anchor.get("round_id")):
+                diag_block += (
+                    f"\nNote: your per-station ledger best (round "
+                    f"{best_record.get('round_id')}, NSE "
+                    f"{_safe(best_record.get('nse'))}) is local-diagnostic-only: "
+                    "its joint bundle was not accepted watershed-wide, and it "
+                    "is NOT the current center."
+                )
         else:
             diag_block = "First round — no diagnosis."
 
         # ── Full history table (~25 tokens/row) ──
-        history_table = self.memory.format_full_history_table(phase=phase_upper)
+        history_table = self.memory.format_full_history_table(
+            phase=phase_upper, model_combination=self.model_combination,
+        )
 
-        # ── Best NSE ──
-        best_record = self.ledger.get_best_params()
-        best_nse = best_record.get("nse", 0.0) if best_record else 0.0
+        # ── Best NSE (the bundle's per-station NSE when anchored) ──
+        anchor_nse = anchor.get("nse") if anchor is not None else None
+        if anchor_nse is not None:
+            best_nse = anchor_nse
+        else:
+            best_nse = best_record.get("nse", 0.0) if best_record else 0.0
         best_nse_str = f"{best_nse:.4f}" if isinstance(best_nse, (int, float)) else "0.0000"
 
         # ── Leader guidance ──
@@ -598,6 +786,8 @@ class WorkerAgent:
         """Run local diagnostics and generate report for Leader.
 
         Diagnosis is pre-computed by code — also cached for Worker LLM prompt.
+        context may carry "current_params" (the candidate's parameter values,
+        forwarded to diagnose_round for evidence-gated rules such as perco).
         """
         diagnosis = diagnose_round(metrics, prev_metrics, context)
         self._last_diagnosis = diagnosis
@@ -668,7 +858,7 @@ class WorkerAgent:
 
         rk = _to_float(metrics.get("recession_k_ratio"), None)
         if rk is not None:
-            recession_status = "too_fast" if rk < 0.8 else ("too_slow" if rk > 1.2 else "ok")
+            recession_status = "too_fast" if rk > 1.2 else ("too_slow" if rk < 0.8 else "ok")
         else:
             recession_status = "unknown"
 

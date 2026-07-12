@@ -8,11 +8,11 @@ Controls how rainfall is partitioned between infiltration and surface runoff.
 - **Medium (0.1–0.25)**: Moderate surface runoff. Good balance for most basins.
 - **High (0.25–0.4)**: Most rain becomes surface runoff. Sharp, high peaks. Suitable for low-permeability or urban basins.
 - **Diagnostic**: peak_ratio > 1.0 → decrease binfilt. peak_ratio < 1.0 → increase binfilt.
-- **Note**: In the semi-arid Huaihe Basin, optimal binfilt is typically 0.10–0.30.
+- **Note**: In semi-arid basins, optimal binfilt is typically 0.10–0.30; wetter or snow-fed basins may sit lower.
 
 ### Ds (Baseflow Non-linearity, 0.0001–1.0)
 Controls the responsiveness of baseflow drainage.
-- **Low (0.001–0.1)**: Baseflow is sluggish, drains slowly. Long recession curves.
+- **Low (0.0001–0.1)**: Baseflow is sluggish, drains slowly. Long recession curves.
 - **High (0.5–1.0)**: Baseflow responds quickly to soil moisture changes. Short recession.
 - **Diagnostic**: lowflow_ratio < 1.0 → increase Ds. Recession too fast → decrease Ds.
 - **Interaction**: Ds acts as a fraction-multiplier of Dsmax.
@@ -30,10 +30,10 @@ Soil moisture fraction at which non-linear (fast) baseflow begins.
 - **High (0.8–1.0)**: Soil must be nearly saturated before fast drainage starts.
 - **Diagnostic**: Recession starts too early → increase Ws. Delayed too long → decrease Ws.
 
-### soil_d2 (Layer 2 Depth, 0.2–1.5 m)
+### soil_d2 (Layer 2 Depth, 0.1–2.0 m)
 Depth of the middle soil layer.
-- **Shallow (0.2–0.5)**: Less storage, flashier response.
-- **Deep (0.8–1.5)**: More storage buffer, smoother hydrograph.
+- **Shallow (0.1–0.5)**: Less storage, flashier response.
+- **Deep (1.0–2.0)**: More storage buffer, smoother hydrograph.
 - **Diagnostic**: PBIAS > 0 → increase soil_d2. Peaks too high → increase soil_d2.
 - **Constraint**: MUST be less than soil_d3.
 

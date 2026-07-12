@@ -630,23 +630,77 @@ class LLMClient:
 
     @staticmethod
     def _validate_schema(data: Dict, schema: Dict) -> None:
-        """Basic JSON schema validation. Checks required fields exist."""
-        required = schema.get("required", [])
-        properties = schema.get("properties", {})
-        missing = [k for k in required if k not in data]
-        if missing:
-            raise ValueError(f"JSON schema validation failed. Missing required fields: {missing}")
-        for k, v in data.items():
-            if k in properties:
-                expected_type = properties[k].get("type")
-                if expected_type == "number" and not isinstance(v, (int, float)):
-                    raise ValueError(f"Field '{k}' expected number, got {type(v).__name__}")
-                if expected_type == "string" and not isinstance(v, str):
-                    raise ValueError(f"Field '{k}' expected string, got {type(v).__name__}")
-                if expected_type == "array" and not isinstance(v, list):
-                    raise ValueError(f"Field '{k}' expected array, got {type(v).__name__}")
-                if expected_type == "object" and not isinstance(v, dict):
-                    raise ValueError(f"Field '{k}' expected object, got {type(v).__name__}")
+        """Recursive JSON schema validation.
+
+        Supports: type (object/array/string/number/integer/boolean/null),
+        properties recursion, required at every object level,
+        additionalProperties:false, items for arrays, and enum.
+        Unknown/unsupported schema keywords are ignored.
+        """
+        LLMClient._validate_node(data, schema, "")
+
+    @staticmethod
+    def _validate_node(value, schema: Dict, path: str) -> None:
+        loc = path or "<root>"
+
+        expected_type = schema.get("type")
+        if expected_type is not None:
+            allowed = expected_type if isinstance(expected_type, list) else [expected_type]
+            if not any(LLMClient._type_matches(value, t) for t in allowed):
+                raise ValueError(
+                    f"JSON schema validation failed at {loc}: "
+                    f"expected {expected_type}, got {type(value).__name__}"
+                )
+
+        enum_values = schema.get("enum")
+        if enum_values is not None and value not in enum_values:
+            raise ValueError(
+                f"JSON schema validation failed at {loc}: "
+                f"value {value!r} not in enum {enum_values}"
+            )
+
+        if isinstance(value, dict):
+            required = schema.get("required", [])
+            missing = [k for k in required if k not in value]
+            if missing:
+                raise ValueError(
+                    f"JSON schema validation failed at {loc}: "
+                    f"missing required fields {missing}"
+                )
+            properties = schema.get("properties", {})
+            if schema.get("additionalProperties") is False:
+                extra = [k for k in value if k not in properties]
+                if extra:
+                    raise ValueError(
+                        f"JSON schema validation failed at {loc}: unexpected keys {extra}"
+                    )
+            for k, v in value.items():
+                if k in properties and isinstance(properties[k], dict):
+                    child_path = f"{path}.{k}" if path else k
+                    LLMClient._validate_node(v, properties[k], child_path)
+        elif isinstance(value, list):
+            items_schema = schema.get("items")
+            if isinstance(items_schema, dict):
+                for i, item in enumerate(value):
+                    LLMClient._validate_node(item, items_schema, f"{path}[{i}]")
+
+    @staticmethod
+    def _type_matches(value, type_name: str) -> bool:
+        if type_name == "object":
+            return isinstance(value, dict)
+        if type_name == "array":
+            return isinstance(value, list)
+        if type_name == "string":
+            return isinstance(value, str)
+        if type_name == "number":
+            return isinstance(value, (int, float)) and not isinstance(value, bool)
+        if type_name == "integer":
+            return isinstance(value, int) and not isinstance(value, bool)
+        if type_name == "boolean":
+            return isinstance(value, bool)
+        if type_name == "null":
+            return value is None
+        return True  # unknown type keyword: ignore
 
 
 # ---------------------------------------------------------------------------

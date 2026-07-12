@@ -60,6 +60,35 @@ class SWATExecutor(ModelExecutor):
             upstream_soil_info=upstream_soil_info,
         )
 
+    def run_batched(
+        self,
+        run_id: int,
+        per_worker_params: Dict[str, Dict[str, float]],
+        apply_order: List[str],
+        phase_tag: str = "",
+        log_path: str = "",
+        outlet_subbasin_id: str = "bengbu",
+        output_csv_paths: Optional[Dict[str, str]] = None,
+    ) -> Tuple[bool, Dict[str, Dict[str, float]]]:
+        """ONE joint SWAT+ simulation applying every worker's params at once.
+
+        Delegates to :meth:`SWATPlusExecutor.run_batched`, which writes a
+        single calibration.cal with mutually exclusive HRU selectors per
+        worker (nested HRU locking) in real mode, and computes per-site
+        metrics from the combined param map in simulate mode (each site
+        scored on its own params). Both modes share this call path; only
+        the innermost execution differs.
+        """
+        return self._swat.run_batched(
+            run_id=run_id,
+            per_worker_params=per_worker_params,
+            apply_order=apply_order,
+            phase_tag=phase_tag,
+            log_path=log_path,
+            outlet_subbasin_id=outlet_subbasin_id,
+            output_csv_paths=output_csv_paths,
+        )
+
     def register_basin(self, subbasin_id: str, basin_config: Any) -> None:
         """Accepts a ``SWATPlusConfig`` (preferred) or a dict that we'll
         coerce into one for symmetry with the CaMa-Flood combo registration."""

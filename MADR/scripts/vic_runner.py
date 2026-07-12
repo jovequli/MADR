@@ -59,6 +59,12 @@ class RuntimeConfig:
     start_year: int
     end_year: int
     flux_prefix: str = "huaihe_fluxes_"
+    spin_up_years: int = 0  # Warm-up years simulated before start_year, excluded from metrics
+    # Explicit evaluation window (evaluation_period). When set, the simulation
+    # runs exactly start_year..end_year, metrics use only this window, and
+    # spin_up_years is ignored.
+    eval_start_year: Optional[int] = None
+    eval_end_year: Optional[int] = None
 
     @property
     def output_root(self) -> str:
@@ -230,8 +236,16 @@ def _find_peaks(values: List[float], threshold: float,
     return peaks
 
 
-def _peak_timing_bias(sim: List[float], obs: List[float]) -> float:
-    """Average peak timing bias in days. Negative = sim peaks early."""
+def _peak_timing_bias(sim: List[float], obs: List[float],
+                      dates: Optional[List[dt.date]] = None) -> float:
+    """Average peak timing bias in days. Negative = sim peaks early.
+
+    When ``dates`` (aligned 1:1 with sim/obs) is given, the bias between
+    matched peaks is measured in calendar days,
+    (dates[sim_peak] - dates[obs_peak]).days, so gaps in a date-joined
+    series do not compress the timeline. Peaks are still located and
+    matched by array index; default None keeps the index-based behavior.
+    """
     try:
         if len(obs) < 30:
             return float("nan")
@@ -243,10 +257,13 @@ def _peak_timing_bias(sim: List[float], obs: List[float]) -> float:
             return float("nan")
         biases = []
         for op in obs_peaks:
-            dists = [(abs(sp - op), sp - op) for sp in sim_peaks]
-            min_abs, bias = min(dists, key=lambda x: x[0])
+            dists = [(abs(sp - op), sp) for sp in sim_peaks]
+            min_abs, nearest_sp = min(dists, key=lambda x: x[0])
             if min_abs <= 5:
-                biases.append(bias)
+                if dates is not None:
+                    biases.append((dates[nearest_sp] - dates[op]).days)
+                else:
+                    biases.append(nearest_sp - op)
         return round(sum(biases) / len(biases), 1) if biases else float("nan")
     except Exception:
         return float("nan")
@@ -367,7 +384,9 @@ def compute_signatures(obs_dict: Dict[dt.date, float],
     o = [obs_dict[d] for d in dates]
     s = [sim_dict[d] for d in dates]
     return {
-        "peak_timing_bias_days": _peak_timing_bias(s, o),
+        # The obs∩sim date join can skip missing obs days, so measure the
+        # timing bias in calendar days rather than array indices.
+        "peak_timing_bias_days": _peak_timing_bias(s, o, dates=dates),
         "peak_magnitude_bias_pct": _peak_magnitude_bias(s, o),
         "recession_k_ratio": _recession_k_ratio(s, o),
         "baseflow_index_bias_pct": _baseflow_index_bias(s, o),
@@ -457,7 +476,9 @@ def write_soil_params(
 
 
 def write_global_param(src_path: str, dst_path: str,
-                       soil_path: str, result_dir: str) -> None:
+                       soil_path: str, result_dir: str,
+                       start_year: Optional[int] = None) -> None:
+    """Rewrite SOIL / RESULT_DIR (and optionally STARTYEAR, for spin-up runs)."""
     with open(src_path, "r", encoding="utf-8", errors="ignore") as f_in, \
          open(dst_path, "w", encoding="utf-8") as f_out:
         for line in f_in:
@@ -467,6 +488,8 @@ def write_global_param(src_path: str, dst_path: str,
             elif stripped.startswith("RESULT_DIR"):
                 rd = result_dir if result_dir.endswith("/") else result_dir + "/"
                 f_out.write(f"RESULT_DIR              {rd}\n")
+            elif start_year is not None and stripped.startswith("STARTYEAR"):
+                f_out.write(f"STARTYEAR               {start_year}\n")
             else:
                 f_out.write(line)
 
@@ -740,6 +763,19 @@ def run_once(cfg: RuntimeConfig, run_id: int, params: Dict[str, float],
     current = cfg.current_dir
     reset_dir(current)
 
+    # Spin-up: simulate from (start_year - spin_up_years) but keep the
+    # metrics window at start_year..end_year. When an explicit evaluation
+    # window (eval_start_year/eval_end_year) is set, the simulation runs
+    # exactly start_year..end_year, metrics use only the evaluation window,
+    # and spin_up_years is ignored.
+    explicit_eval = cfg.eval_start_year is not None and cfg.eval_end_year is not None
+    if explicit_eval:
+        sim_start_year = cfg.start_year
+        eval_start_year, eval_end_year = cfg.eval_start_year, cfg.eval_end_year
+    else:
+        sim_start_year = cfg.start_year - cfg.spin_up_years
+        eval_start_year, eval_end_year = cfg.start_year, cfg.end_year
+
     vic_for_routing = os.path.join(current, "vic_for_routing")
     routing_result = os.path.join(current, "routing_result")
 
@@ -747,6 +783,14 @@ def run_once(cfg: RuntimeConfig, run_id: int, params: Dict[str, float],
         log.write(f"Run {run_id} start: phase={phase}, params={params}\n")
         if routing_params:
             log.write(f"  routing_params: {routing_params}\n")
+        if explicit_eval:
+            log.write(f"  evaluation_period: simulate {sim_start_year}-{cfg.end_year}, "
+                      f"evaluate {eval_start_year}-{eval_end_year}"
+                      + (f" (spin_up_years={cfg.spin_up_years} ignored)\n"
+                         if cfg.spin_up_years else "\n"))
+        elif cfg.spin_up_years:
+            log.write(f"  spin_up_years={cfg.spin_up_years}: simulate from {sim_start_year}, "
+                      f"evaluate {cfg.start_year}-{cfg.end_year}\n")
 
     if vic_flux_source and os.path.isdir(vic_flux_source):
         # Routing-only mode: skip VIC, reuse existing flux output
@@ -763,7 +807,9 @@ def run_once(cfg: RuntimeConfig, run_id: int, params: Dict[str, float],
                           upstream_soil_infos=upstream_soil_info)
 
         global_path = os.path.join(current, "global_param.txt")
-        write_global_param(cfg.global_base, global_path, soil_path, vic_result)
+        write_global_param(cfg.global_base, global_path, soil_path, vic_result,
+                           start_year=sim_start_year
+                           if (cfg.spin_up_years or explicit_eval) else None)
 
         if not run_vic_with_watchdog(cfg, run_id, global_path, log_path):
             return False, {}
@@ -771,7 +817,7 @@ def run_once(cfg: RuntimeConfig, run_id: int, params: Dict[str, float],
         preprocess_vic_output(vic_result, vic_for_routing)
     routing_dir = prepare_routing_dir(
         current, vic_for_routing, routing_result,
-        cfg.start_year, cfg.end_year,
+        sim_start_year, cfg.end_year,
         rout_template_dir=cfg.rout_template_dir,
         flux_prefix=cfg.flux_prefix,
         routing_params=routing_params,
@@ -793,11 +839,12 @@ def run_once(cfg: RuntimeConfig, run_id: int, params: Dict[str, float],
             log.write(f"Run {run_id} missing routing day file.\n")
         return False, {}
 
-    start_date = dt.date(cfg.start_year, 1, 1)
-    end_date = dt.date(cfg.end_year, 12, 31)
+    start_date = dt.date(eval_start_year, 1, 1)
+    end_date = dt.date(eval_end_year, 12, 31)
     obs = read_obs(cfg.obs_file, start_date, end_date)
     sim = read_sim_day(day_file, start_date, end_date)
-    if is_monthly_obs(obs):
+    monthly = is_monthly_obs(obs)
+    if monthly:
         sim = aggregate_sim_to_monthly(sim)
     nse, rmse, pbias, kge, peak_ratio, low_ratio = compute_metrics(obs, sim)
 
@@ -811,7 +858,17 @@ def run_once(cfg: RuntimeConfig, run_id: int, params: Dict[str, float],
     }
     # Extended hydrologic signatures
     sigs = compute_signatures(obs, sim)
+    if monthly:
+        # On a monthly series the peak-timing index step is one month, not
+        # one day, so the day-unit signature would mislead; report missing.
+        sigs["peak_timing_bias_days"] = float("nan")
+        # Recession fitting needs 5+ consecutive declining DAILY steps and
+        # the Lyne-Hollick alpha=0.925 is a daily filter constant; both are
+        # physically meaningless on monthly means.
+        sigs["recession_k_ratio"] = float("nan")
+        sigs["baseflow_index_bias_pct"] = float("nan")
     metrics.update(sigs)
+    metrics["timestep"] = "monthly" if monthly else "daily"
 
     with open(log_path, "a", encoding="utf-8") as log:
         log.write(f"Run {run_id} done: NSE={nse:.4f}, RMSE={rmse:.4f}, PBIAS={pbias:.2f}%\n")
@@ -844,7 +901,9 @@ def run_vic_flux_only(cfg: RuntimeConfig, run_id: int, params: Dict[str, float],
                       upstream_soil_infos=upstream_soil_info)
 
     global_path = os.path.join(current, "global_param.txt")
-    write_global_param(cfg.global_base, global_path, soil_path, vic_result)
+    sim_start_year = cfg.start_year - cfg.spin_up_years
+    write_global_param(cfg.global_base, global_path, soil_path, vic_result,
+                       start_year=sim_start_year if cfg.spin_up_years else None)
 
     with open(log_path, "a", encoding="utf-8") as log:
         log.write(f"VIC-flux-only run {run_id}: phase={phase}, params={params}\n")

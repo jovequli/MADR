@@ -1,7 +1,7 @@
 {
-  "_comment": "MADR — VIC + Lohmann routing example (Huai River basin upstream of Bengbu, 5 nested sub-basins). Calibration period 1980–1990. Reproduces the paper's vic_routing combination. Dynamic-convergence build with patience-based phase termination + mandatory final force-best round.",
-  "_path_replacement_notice": "All absolute paths in this config (vic_exe, rout_exe, swatplus_exe, and each worker's obs_file/soil_base/global_base/rout_template_dir/etc.) are placeholders from the author's local setup. REPLACE them with your own local paths before running.",
-  "run_name": "MADR_cli_v2",
+  "_comment": "MADR — VIC + Lohmann routing example for the five nested Huai River sub-basins. Simulates 1980–1990 and evaluates 1981–1990, using 1980 as spin-up.",
+  "_path_replacement_notice": "All /path/to/... values are placeholders. Replace them with paths from your own model installation and dataset before running.",
+  "run_name": "vic_routing_bengbu",
   "max_rounds": 0,
   "candidates_per_worker": 1,
   "max_parallel_workers": 3,
@@ -9,12 +9,16 @@
     "start_year": 1980,
     "end_year": 1990
   },
+  "evaluation_period": {
+    "start_year": 1981,
+    "end_year": 1990
+  },
   "model_binding": {
     "mode": "real"
   },
   "outlet_subbasin_id": "bengbu",
-  "vic_exe": "/Users/yc/cowork/framework/model/VIC-5.1.0/vic/drivers/classic/vic_classic.exe",
-  "rout_exe": "/Users/yc/cowork/framework/model/route_1.0/src/rout",
+  "vic_exe": "/path/to/vic_classic",
+  "rout_exe": "/path/to/lohmann/rout",
   "objective_weights": {
     "mean_nse": 0.9,
     "consistency": 0.1
@@ -124,15 +128,15 @@
       "api_key_env": "ANTHROPIC_API_KEY",
       "timeout_sec": 600.0,
       "memory_window": 5,
-      "obs_file": "/Users/yc/cowork/framework/data/obs/XX/51012-2-xixian.txt",
+      "obs_file": "/path/to/observations/xixian.txt",
       "neighbors_downstream": [
         "wangjiaba"
       ],
       "is_outlet": false,
-      "soil_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/xixian_1980-1990_025deg/vic_temp/soil/SOIL_PARAM_COMPLETE.txt",
-      "global_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/xixian_1980-1990_025deg/vic_temp/global_param_xixian_1980-1990_025deg.txt",
-      "rout_template_dir": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/xixian_1980-1990_025deg/routing_param",
-      "rout_exe": "/Users/yc/cowork/framework/model/route_1.0/src/rout"
+      "soil_base": "/path/to/model_inputs/xixian/SOIL_PARAM_COMPLETE.txt",
+      "global_base": "/path/to/model_inputs/xixian/global_param.txt",
+      "rout_template_dir": "/path/to/model_inputs/xixian/routing_param",
+      "rout_exe": "/path/to/lohmann/rout"
     },
     {
       "agent_id": "worker_wangjiaba",
@@ -145,15 +149,15 @@
       "api_key_env": "ANTHROPIC_API_KEY",
       "timeout_sec": 600.0,
       "memory_window": 5,
-      "obs_file": "/Users/yc/cowork/framework/data/obs/WJB/HUAIH-51030-wangjiaba.txt",
+      "obs_file": "/path/to/observations/wangjiaba.txt",
       "neighbors_downstream": [
         "bengbu"
       ],
       "is_outlet": false,
-      "soil_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/wangjiaba_1980-1990_025deg/vic_temp/soil/SOIL_PARAM_COMPLETE.txt",
-      "global_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/wangjiaba_1980-1990_025deg/vic_temp/global_param_wangjiaba_1980-1990_025deg.txt",
-      "rout_template_dir": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/wangjiaba_1980-1990_025deg/routing_param",
-      "rout_exe": "/Users/yc/cowork/framework/model/route_1.0/src/rout"
+      "soil_base": "/path/to/model_inputs/wangjiaba/SOIL_PARAM_COMPLETE.txt",
+      "global_base": "/path/to/model_inputs/wangjiaba/global_param.txt",
+      "rout_template_dir": "/path/to/model_inputs/wangjiaba/routing_param",
+      "rout_exe": "/path/to/lohmann/rout"
     },
     {
       "agent_id": "worker_jiangjiaji",
@@ -166,15 +170,15 @@
       "api_key_env": "ANTHROPIC_API_KEY",
       "timeout_sec": 600.0,
       "memory_window": 5,
-      "obs_file": "/Users/yc/cowork/framework/data/obs/JJJ/HUAIH-51590-jiangjiaji.txt",
+      "obs_file": "/path/to/observations/jiangjiaji.txt",
       "neighbors_downstream": [
         "bengbu"
       ],
       "is_outlet": false,
-      "soil_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/jiangjiaji_1980-1990_025deg/vic_temp/soil/SOIL_PARAM_COMPLETE.txt",
-      "global_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/jiangjiaji_1980-1990_025deg/vic_temp/global_param_jiangjiaji_1980-1990_025deg.txt",
-      "rout_template_dir": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/jiangjiaji_1980-1990_025deg/routing_param",
-      "rout_exe": "/Users/yc/cowork/framework/model/route_1.0/src/rout"
+      "soil_base": "/path/to/model_inputs/jiangjiaji/SOIL_PARAM_COMPLETE.txt",
+      "global_base": "/path/to/model_inputs/jiangjiaji/global_param.txt",
+      "rout_template_dir": "/path/to/model_inputs/jiangjiaji/routing_param",
+      "rout_exe": "/path/to/lohmann/rout"
     },
     {
       "agent_id": "worker_zhoukou",
@@ -187,15 +191,15 @@
       "api_key_env": "ANTHROPIC_API_KEY",
       "timeout_sec": 600.0,
       "memory_window": 5,
-      "obs_file": "/Users/yc/cowork/framework/data/obs/ZK/HUAIH-51760-zhoukou.txt",
+      "obs_file": "/path/to/observations/zhoukou.txt",
       "neighbors_downstream": [
         "bengbu"
       ],
       "is_outlet": false,
-      "soil_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/zhoukou_1980-1990_025deg/vic_temp/soil/SOIL_PARAM_COMPLETE.txt",
-      "global_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/zhoukou_1980-1990_025deg/vic_temp/global_param_zhoukou_1980-1990_025deg.txt",
-      "rout_template_dir": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/zhoukou_1980-1990_025deg/routing_param",
-      "rout_exe": "/Users/yc/cowork/framework/model/route_1.0/src/rout"
+      "soil_base": "/path/to/model_inputs/zhoukou/SOIL_PARAM_COMPLETE.txt",
+      "global_base": "/path/to/model_inputs/zhoukou/global_param.txt",
+      "rout_template_dir": "/path/to/model_inputs/zhoukou/routing_param",
+      "rout_exe": "/path/to/lohmann/rout"
     },
     {
       "agent_id": "worker_bengbu",
@@ -208,17 +212,17 @@
       "api_key_env": "ANTHROPIC_API_KEY",
       "timeout_sec": 600.0,
       "memory_window": 5,
-      "obs_file": "/Users/yc/cowork/framework/data/obs/BB/51080_bengbu.txt",
+      "obs_file": "/path/to/observations/bengbu.txt",
       "neighbors_downstream": [],
       "is_outlet": true,
-      "soil_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/bengbu_1980-1990_025deg/vic_temp/soil/SOIL_PARAM_COMPLETE.txt",
-      "global_base": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/bengbu_1980-1990_025deg/vic_temp/global_param_bengbu_1980-1990_025deg.txt",
-      "rout_template_dir": "/Users/yc/cowork/framework/outputs/subbasin_vic_routing_1980_1990/bengbu_1980-1990_025deg/routing_param",
-      "rout_exe": "/Users/yc/cowork/framework/model/route_1.0/src/rout"
+      "soil_base": "/path/to/model_inputs/bengbu/SOIL_PARAM_COMPLETE.txt",
+      "global_base": "/path/to/model_inputs/bengbu/global_param.txt",
+      "rout_template_dir": "/path/to/model_inputs/bengbu/routing_param",
+      "rout_exe": "/path/to/lohmann/rout"
     }
   ],
   "initial_exploration": {
     "enabled": true,
-    "seed_from_run": "/Volumes/Expansion4t/hydro-space2/learn/result_repo/20260530_103319_MADR_claude_explore"
+    "seed_from_run": ""
   }
 }

@@ -1,6 +1,6 @@
 {
   "_comment": "MADR — VIC + CaMa-Flood example (Songhua River nested pair: Jiangqiao upstream → Jiamusi outlet). Real-mode pipeline: VIC produces grid fluxes → NetCDF conversion → CaMa-Flood with calibrated channel parameters → metrics at outlet. Exercises topological ordering and per-reach channel-param locking.",
-  "_path_replacement_notice": "All absolute paths in this config (vic_exe, rout_exe, swatplus_exe, and each worker's obs_file/soil_base/global_base/rout_template_dir/etc.) are placeholders from the author's local setup. REPLACE them with your own local paths before running.",
+  "_path_replacement_notice": "All /path/to/... values are placeholders. Replace them with paths from your own model installation and dataset before running.",
   "run_name": "songhua_nested_real",
   "max_rounds": 0,
   "candidates_per_worker": 1,
@@ -9,12 +9,16 @@
     "start_year": 2000,
     "end_year": 2024
   },
+  "evaluation_period": {
+    "start_year": 2001,
+    "end_year": 2024
+  },
   "model_binding": {
     "mode": "real"
   },
   "model_combination": "vic_cama_flood",
   "outlet_subbasin_id": "jms",
-  "vic_exe": "/home/yc/桌面/cc/MADR/test/vic_cama_pkg_2000-2024/models/VIC-5.1.0/vic/drivers/classic/vic_classic.exe",
+  "vic_exe": "/path/to/vic_classic",
   "objective_weights": {
     "mean_nse": 0.9,
     "consistency": 0.1
@@ -126,22 +130,22 @@
       "neighbors_downstream": [
         "jms"
       ],
-      "obs_file": "/home/yc/桌面/cc/MADR/test/outputs/obs/jq_obs.csv",
-      "soil_base": "/home/yc/桌面/cc/MADR/test/vic_cama_pkg_2000-2024/basins/Songhua/J.Q_2000-2024_025deg/vic_temp/soil/SOIL_PARAM_COMPLETE.txt",
-      "global_base": "/home/yc/桌面/cc/MADR/test/vic_cama_pkg_2000-2024/basins/Songhua/J.Q_2000-2024_025deg/vic_temp/global_param_J.Q_2000-2024_025deg.txt",
+      "obs_file": "/path/to/observations/jiangqiao.csv",
+      "soil_base": "/path/to/model_inputs/jiangqiao/SOIL_PARAM_COMPLETE.txt",
+      "global_base": "/path/to/model_inputs/jiangqiao/global_param.txt",
       "cama_flood_config": {
-        "cmf_pkg_dir": "/home/yc/桌面/cc/MADR/test/vic_cama_pkg_2000-2024/models/cmf_v420_pkg",
+        "cmf_pkg_dir": "/path/to/cmf_v420_pkg",
         "basin_map": "J.Q_15min",
         "diminfo": "diminfo_J.Q_025deg.txt",
-        "forcing_dir": "/home/yc/桌面/cc/MADR/test/outputs/cama_forcing/jq",
+        "forcing_dir": "/path/to/cama_forcing/jiangqiao",
         "forcing_var": "Runoff",
         "forcing_prefix": "jq_runoff_1d",
         "outlet": {
           "ix": 13,
           "iy": 19
         },
-        "obs_file": "/home/yc/桌面/cc/MADR/test/outputs/obs/jq_obs.csv",
-        "start_year": 2001,
+        "obs_file": "/path/to/observations/jiangqiao.csv",
+        "start_year": 2000,
         "end_year": 2024,
         "manning_river": 0.03,
         "manning_floodplain": 0.1,
@@ -161,22 +165,22 @@
       "memory_window": 5,
       "is_outlet": true,
       "neighbors_downstream": [],
-      "obs_file": "/home/yc/桌面/cc/MADR/test/outputs/obs/jms_obs.csv",
-      "soil_base": "/home/yc/桌面/cc/MADR/test/vic_cama_pkg_2000-2024/basins/Songhua/J.M.S_2000-2024_025deg/vic_temp/soil/SOIL_PARAM_COMPLETE.txt",
-      "global_base": "/home/yc/桌面/cc/MADR/test/vic_cama_pkg_2000-2024/basins/Songhua/J.M.S_2000-2024_025deg/vic_temp/global_param_J.M.S_2000-2024_025deg.txt",
+      "obs_file": "/path/to/observations/jiamusi.csv",
+      "soil_base": "/path/to/model_inputs/jiamusi/SOIL_PARAM_COMPLETE.txt",
+      "global_base": "/path/to/model_inputs/jiamusi/global_param.txt",
       "cama_flood_config": {
-        "cmf_pkg_dir": "/home/yc/桌面/cc/MADR/test/vic_cama_pkg_2000-2024/models/cmf_v420_pkg",
+        "cmf_pkg_dir": "/path/to/cmf_v420_pkg",
         "basin_map": "J.M.S_15min",
         "diminfo": "diminfo_J.M.S_025deg.txt",
-        "forcing_dir": "/home/yc/桌面/cc/MADR/test/outputs/cama_forcing/jms",
+        "forcing_dir": "/path/to/cama_forcing/jiamusi",
         "forcing_var": "Runoff",
         "forcing_prefix": "jms_runoff_1d",
         "outlet": {
           "ix": 42,
           "iy": 20
         },
-        "obs_file": "/home/yc/桌面/cc/MADR/test/outputs/obs/jms_obs.csv",
-        "start_year": 2001,
+        "obs_file": "/path/to/observations/jiamusi.csv",
+        "start_year": 2000,
         "end_year": 2024,
         "manning_river": 0.03,
         "manning_floodplain": 0.1,

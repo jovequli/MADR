@@ -1,9 +1,9 @@
 {
   "_comment": "MADR — SWAT+ example (Yellow River, Tangnaihai → Lanzhou nested pair, 1979–1990 with 1981–1990 evaluation period). Single-phase SWATPLUS_HRU calibration over the 18 SWAT+ HRU/groundwater/snow parameters. Set MADR_SWATPLUS_CAL_PARMS env var if you need cal_parms.cal auto-copied into TxtInOut directories that lack it.",
-  "_path_replacement_notice": "All absolute paths in this config (vic_exe, rout_exe, swatplus_exe, and each worker's obs_file/soil_base/global_base/rout_template_dir/etc.) are placeholders from the author's local setup. REPLACE them with your own local paths before running.",
-  "run_name": "MADR_final_swat_smoke",
-  "output_root": "/Volumes/Expansion4t/hydro-space2/其他模型测试/黄河/result_repo/yellow_tnh_lz_50_90/",
-  "swatplus_scratch_dir": "/tmp/yellow_tnh_lz_scratch",
+  "_path_replacement_notice": "All /path/to/... values are placeholders. Replace them with paths from your own model installation and dataset before running.",
+  "run_name": "swat_yellow",
+  "output_root": "./output/swat_yellow",
+  "swatplus_scratch_dir": "./.madr_scratch/swat_yellow",
   "max_rounds": 90,
   "candidates_per_worker": 1,
   "max_parallel_workers": 2,
@@ -30,13 +30,14 @@
     "mode": "simulate"
   },
   "outlet_subbasin_id": "lanzhou",
-  "swatplus_exe": "/Volumes/Expansion4t/hydro-space2/model/swatplus/build/swatplus-unknown-gnu-mac_arm64-Rel",
-  "txtinout_template": "/Volumes/Expansion4t/hydro-space2/其他模型测试/黄河/TxtInOut_run",
-  "subbasin_attrs_file": "/Volumes/Expansion4t/hydro-space2/其他模型测试/黄河/subbasin_attrs.json",
+  "swatplus_exe": "/path/to/swatplus",
+  "txtinout_template": "/path/to/TxtInOut",
+  "subbasin_attrs_file": "/path/to/subbasin_attrs.json",
   "objective_weights": {
     "mean_nse": 0.9,
     "consistency": 0.1
   },
+  "mc_selection_metric": "j_total",
   "stop_rules": {
     "outlet_nse_target": 0.85,
     "min_improvement": 0.003,
@@ -190,7 +191,7 @@
       "max_tokens": 8192,
       "timeout_sec": 120.0,
       "memory_window": 5,
-      "obs_file": "/Volumes/Expansion4t/hydro-space2/其他模型测试/黄河/tnh/唐乃亥_月.txt",
+      "obs_file": "/path/to/observations/tangnaihai_monthly.txt",
       "neighbors_downstream": [
         "lanzhou"
       ],
@@ -219,9 +220,9 @@
         66,
         74
       ],
-      "subbasin_attrs_file": "/Volumes/Expansion4t/hydro-space2/其他模型测试/黄河/subbasin_attrs.json",
-      "txtinout_template": "/Volumes/Expansion4t/hydro-space2/其他模型测试/黄河/TxtInOut_run",
-      "swatplus_exe": "/Volumes/Expansion4t/hydro-space2/model/swatplus/build/swatplus-unknown-gnu-mac_arm64-Rel",
+      "subbasin_attrs_file": "/path/to/subbasin_attrs.json",
+      "txtinout_template": "/path/to/TxtInOut",
+      "swatplus_exe": "/path/to/swatplus",
       "api_key_env": "ANTHROPIC_API_KEY"
     },
     {
@@ -234,7 +235,7 @@
       "max_tokens": 8192,
       "timeout_sec": 120.0,
       "memory_window": 5,
-      "obs_file": "/Volumes/Expansion4t/hydro-space2/其他模型测试/黄河/lanzhou_monthly_obs.txt",
+      "obs_file": "/path/to/observations/lanzhou_monthly.txt",
       "neighbors_downstream": [],
       "is_outlet": true,
       "hru_fids": [
@@ -328,9 +329,9 @@
         88,
         89
       ],
-      "subbasin_attrs_file": "/Volumes/Expansion4t/hydro-space2/其他模型测试/黄河/subbasin_attrs.json",
-      "txtinout_template": "/Volumes/Expansion4t/hydro-space2/其他模型测试/黄河/TxtInOut_run",
-      "swatplus_exe": "/Volumes/Expansion4t/hydro-space2/model/swatplus/build/swatplus-unknown-gnu-mac_arm64-Rel",
+      "subbasin_attrs_file": "/path/to/subbasin_attrs.json",
+      "txtinout_template": "/path/to/TxtInOut",
+      "swatplus_exe": "/path/to/swatplus",
       "api_key_env": "ANTHROPIC_API_KEY"
     }
   ],

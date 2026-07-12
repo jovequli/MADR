@@ -27,6 +27,11 @@ import random
 import logging
 from typing import Dict, List, Optional, Any, Tuple
 
+try:  # 组合感知的阶段可调参数表(权威表在param_validator, 与leader fallback共用)
+    from .param_validator import CalibrationPhase, get_tunable_keys
+except ImportError:  # 平铺(非包)用法
+    from param_validator import CalibrationPhase, get_tunable_keys
+
 logger = logging.getLogger(__name__)
 
 
@@ -53,6 +58,7 @@ MAGNITUDE_FRACTION = {
     "none":   0.0,
 }
 
+# Legacy常量(保留兼容): 活跃参数集现由param_validator.get_tunable_keys给出
 VIC_KEYS = ["binfilt", "Ds", "Dsmax", "Ws", "soil_d2", "soil_d3"]
 ROUTING_KEYS = ["velocity", "diffusivity"]
 
@@ -73,8 +79,12 @@ class WorkerExecutor:
     def __init__(
         self,
         param_ranges: Optional[Dict[str, Tuple[float, float]]] = None,
+        model_combination: str = "vic_routing",
     ):
         self.ranges = param_ranges or dict(PARAM_BOUNDS)
+        # 模型组合(vic_routing/vic_cama_flood/swat), 决定各阶段可调参数集。
+        # 默认vic_routing = 旧行为; 调用方也可在构造后直接对该属性赋值。
+        self.model_combination = model_combination or "vic_routing"
 
     def generate_candidates(
         self,
@@ -240,13 +250,14 @@ class WorkerExecutor:
         return candidate
 
     def _get_active_keys(self, phase: str) -> List[str]:
-        """按校准阶段过滤活跃参数。"""
-        if phase == "vic_only":
-            return [k for k in VIC_KEYS if k in self.ranges]
-        elif phase == "routing_only":
-            return [k for k in ROUTING_KEYS if k in self.ranges]
-        else:
-            return [k for k in VIC_KEYS + ROUTING_KEYS if k in self.ranges]
+        """按校准阶段过滤活跃参数(组合感知, phase大小写不敏感)。"""
+        try:
+            phase_enum = CalibrationPhase(str(phase or "").strip().upper())
+        except ValueError:
+            # 未知阶段: 保持旧行为(视为JOINT, 全参数可调)
+            phase_enum = CalibrationPhase.JOINT
+        keys = get_tunable_keys(phase_enum, self.model_combination)
+        return [k for k in keys if k in self.ranges]
 
     def _fallback_candidates(
         self,

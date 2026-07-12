@@ -20,6 +20,7 @@ Usage:
 """
 
 import logging
+import math
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Any
 
@@ -70,9 +71,11 @@ class LeaderCoordinator:
         self,
         upstream_map: Dict[str, List[str]],
         outlet_id: str = "bengbu",
+        model_combination: str = "vic_routing",
     ):
         self.upstream_map = upstream_map
         self.outlet_id = outlet_id
+        self.model_combination = model_combination
         self.downstream_map: Dict[str, List[str]] = self._build_downstream_map()
 
     # ── Main entry ─────────────────────────────────────────────────
@@ -154,6 +157,10 @@ class LeaderCoordinator:
 
                 # Upstream volume issue + downstream timing issue
                 if us_issue == "volume" and ds_issue == "timing":
+                    volume_params = (
+                        "cn2/esco" if self.model_combination == "swat"
+                        else "binfilt/soil_d2"
+                    )
                     insights.append(CrossBasinInsight(
                         insight_type="upstream_cascade",
                         severity="high",
@@ -162,7 +169,7 @@ class LeaderCoordinator:
                             f"{up_id} has volume bias causing timing issues in {basin_id}. "
                             f"Fix {up_id} runoff generation first."
                         ),
-                        recommendation=f"Focus on {up_id} binfilt/soil_d2 adjustment",
+                        recommendation=f"Focus on {up_id} {volume_params} adjustment",
                     ))
 
                 # Upstream NSE poor (< 0.4) and downstream also poor
@@ -230,6 +237,10 @@ class LeaderCoordinator:
         """Detect routing mismatch: upstream good but downstream poor with high routing responsibility."""
         insights = []
 
+        # SWAT+ has no separate routing module (responsibility is NaN, no split).
+        if self.model_combination == "swat":
+            return insights
+
         for basin_id, ups in self.upstream_map.items():
             if not ups:
                 continue
@@ -253,15 +264,21 @@ class LeaderCoordinator:
             avg_us_nse = sum(us_nses) / len(us_nses)
 
             if avg_us_nse > 0.6 and ds_nse < 0.5 and ds_routing_resp > 0.5:
+                if self.model_combination == "vic_cama_flood":
+                    routing_label = "CaMa"
+                    routing_params = "Hc/Hmin/Wc/Wmin channel geometry"
+                else:
+                    routing_label = "routing"
+                    routing_params = "velocity/diffusivity"
                 insights.append(CrossBasinInsight(
                     insight_type="routing_mismatch",
                     severity="high",
                     affected_basins=[basin_id] + ups,
                     description=(
                         f"Upstream mean NSE={avg_us_nse:.2f} good, but {basin_id}(NSE={ds_nse:.2f}) poor, "
-                        f"routing resp.={ds_routing_resp:.0%}. Likely routing parameter issue."
+                        f"{routing_label} resp.={ds_routing_resp:.0%}. Likely {routing_label} parameter issue."
                     ),
-                    recommendation=f"Focus {basin_id} on velocity/diffusivity adjustment",
+                    recommendation=f"Focus {basin_id} on {routing_params} adjustment",
                 ))
 
         return insights
@@ -380,11 +397,33 @@ class LeaderCoordinator:
                 f"recession={rs.get('recession_status', '?')}, "
                 f"stagnant={rs.get('is_stagnant', False)}"
             )
+            # Responsibility label per model combination (SWAT+ has no
+            # land/routing split — responsibilities are NaN there).
+            def _pct(v):
+                try:
+                    f = float(v)
+                    if math.isnan(f) or math.isinf(f):
+                        return "N/A"
+                    return f"{f:.0%}"
+                except (TypeError, ValueError):
+                    return "N/A"
+
+            if self.model_combination == "swat":
+                resp_str = "model=SWAT+ (integrated land+channel)"
+            elif self.model_combination == "vic_cama_flood":
+                resp_str = (
+                    f"VIC resp.={_pct(diag.get('vic_responsibility', 0))}, "
+                    f"CaMa resp.={_pct(diag.get('routing_responsibility', 0))}"
+                )
+            else:
+                resp_str = (
+                    f"VIC resp.={_pct(diag.get('vic_responsibility', 0))}, "
+                    f"Routing resp.={_pct(diag.get('routing_responsibility', 0))}"
+                )
             lines.append(
                 f"  Diagnosis: {diag.get('primary_issue', 'none')} issue, "
                 f"severity={diag.get('severity', '?')}, "
-                f"VIC resp.={diag.get('vic_responsibility', 0):.0%}, "
-                f"Routing resp.={diag.get('routing_responsibility', 0):.0%}"
+                f"{resp_str}"
             )
             lines.append(f"  Reasoning: {diag.get('reasoning', 'N/A')}")
             lines.append(

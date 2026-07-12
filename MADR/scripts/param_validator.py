@@ -39,6 +39,9 @@ SWAT_PARAM_KEYS = [
     "snofall_tmp", "snomelt_tmp", "snomelt_max", "snomelt_min", "snomelt_lag",
 ]
 
+# Union of every parameter key known across model combinations.
+ALL_PARAM_KEYS = PARAM_KEYS + CAMA_PARAM_KEYS + SWAT_PARAM_KEYS
+
 # Routing defaults (used when the routing slot is "frozen" in VIC_ONLY).
 ROUTING_DEFAULTS = {"velocity": 1.5, "diffusivity": 800.0}
 
@@ -59,13 +62,64 @@ class CalibrationPhase(str, Enum):
     JOINT = "JOINT"                           # All params tunable
 
 
-def get_tunable_keys(phase: CalibrationPhase) -> List[str]:
-    """Default tunable-key set per phase (combination-agnostic).
+# Combination-aware per-phase tunable-key maps. These MIRROR the
+# authoritative ``ModelExecutor.tunable_keys_by_phase`` tables in
+# scripts/executors/vic_routing.py, vic_cama_flood.py and swat.py.
+# Defined here (not imported from the executors) to avoid an import
+# cycle — keep in sync with the executor source of truth.
+COMBINATION_PARAM_KEYS: Dict[str, List[str]] = {
+    "vic_routing":    list(PARAM_KEYS),
+    "vic_cama_flood": list(SOIL_PARAM_KEYS) + list(CAMA_PARAM_KEYS),
+    "swat":           list(SWAT_PARAM_KEYS),
+}
 
-    Each executor overrides this via its own ``tunable_keys_by_phase`` for
-    accuracy; this helper is the safe lowest-common-denominator that does
-    not crash when called from code that doesn't have an executor handle.
+COMBINATION_TUNABLE_KEYS_BY_PHASE: Dict[str, Dict[str, List[str]]] = {
+    "vic_routing": {
+        "VIC_ONLY":        list(SOIL_PARAM_KEYS),
+        "ROUTING_ONLY":    list(ROUTING_PARAM_KEYS),
+        "JOINT":           list(PARAM_KEYS),
+    },
+    "vic_cama_flood": {
+        "VIC_ONLY":        list(SOIL_PARAM_KEYS),
+        "CAMA_FLOOD_ONLY": list(CAMA_PARAM_KEYS),
+        "JOINT":           list(SOIL_PARAM_KEYS) + list(CAMA_PARAM_KEYS),
+    },
+    "swat": {
+        "SWATPLUS_HRU":    list(SWAT_PARAM_KEYS),
+        # JOINT alias kept for compatibility (see executors/swat.py).
+        "JOINT":           list(SWAT_PARAM_KEYS),
+    },
+}
+
+
+def get_tunable_keys(
+    phase: CalibrationPhase,
+    model_combination: Optional[str] = None,
+) -> List[str]:
+    """Tunable-key set per phase.
+
+    When ``model_combination`` names a known combination, returns exactly
+    that combination's tunable set for the phase (mirroring the executor's
+    ``tunable_keys_by_phase``). With the default None, falls back to the
+    legacy combination-agnostic union behaviour so untouched callers keep
+    working.
     """
+    if model_combination is not None:
+        combo = COMBINATION_TUNABLE_KEYS_BY_PHASE.get(model_combination)
+        if combo is None:
+            logger.warning(
+                "get_tunable_keys: unknown model_combination %s; using legacy phase map",
+                model_combination,
+            )
+        else:
+            keys = combo.get(phase.value)
+            if keys is None:
+                logger.warning(
+                    "get_tunable_keys: phase %s not defined for combination %s; nothing tunable",
+                    phase.value, model_combination,
+                )
+                return []
+            return list(keys)
     if phase == CalibrationPhase.VIC_ONLY:
         return list(SOIL_PARAM_KEYS)
     elif phase == CalibrationPhase.ROUTING_ONLY:
@@ -78,8 +132,19 @@ def get_tunable_keys(phase: CalibrationPhase) -> List[str]:
         return list(PARAM_KEYS) + list(CAMA_PARAM_KEYS) + list(SWAT_PARAM_KEYS)
 
 
-def get_locked_keys(phase: CalibrationPhase) -> List[str]:
-    """Default locked-key set per phase. See get_tunable_keys for caveats."""
+def get_locked_keys(
+    phase: CalibrationPhase,
+    model_combination: Optional[str] = None,
+) -> List[str]:
+    """Locked-key set per phase. See get_tunable_keys for caveats.
+
+    When ``model_combination`` names a known combination, the locked set is
+    that combination's own parameters minus the phase's tunable set — keys
+    from other combinations are never included.
+    """
+    if model_combination is not None and model_combination in COMBINATION_TUNABLE_KEYS_BY_PHASE:
+        tunable = set(get_tunable_keys(phase, model_combination))
+        return [k for k in COMBINATION_PARAM_KEYS[model_combination] if k not in tunable]
     if phase == CalibrationPhase.VIC_ONLY:
         return list(ROUTING_PARAM_KEYS) + list(CAMA_PARAM_KEYS)
     elif phase == CalibrationPhase.ROUTING_ONLY:
@@ -97,13 +162,16 @@ def enforce_phase_locks(
     candidates: List[Dict[str, float]],
     phase: CalibrationPhase,
     frozen_center: Dict[str, float],
+    model_combination: Optional[str] = None,
 ) -> List[Dict[str, float]]:
     """Enforce phase-based parameter locking on candidate sets.
 
     For locked params, overwrite candidate values with the frozen center value.
     This is the hard safety net — even if the LLM ignores prompt instructions.
+    When ``model_combination`` is given, only that combination's locked keys
+    are enforced (see get_locked_keys).
     """
-    locked = get_locked_keys(phase)
+    locked = get_locked_keys(phase, model_combination)
     if not locked:
         return candidates
     result = []
@@ -118,7 +186,7 @@ def enforce_phase_locks(
 
 DEFAULT_RANGES: Dict[str, Tuple[float, float]] = {
     "binfilt":     (0.001, 1.0),
-    "Ds":          (0.001, 1.0),
+    "Ds":          (0.0001, 1.0),
     "Dsmax":       (1.0,  30.0),
     "Ws":          (0.001, 1.0),
     "soil_d2":     (0.2,   1.5),
@@ -130,7 +198,7 @@ DEFAULT_RANGES: Dict[str, Tuple[float, float]] = {
 # Minimum values for parameters that must not be zero
 MIN_NONZERO = {
     "binfilt":     0.001,
-    "Ds":          0.001,
+    "Ds":          0.0001,
     "Ws":          0.001,
     "velocity":    0.5,
     "diffusivity": 200.0,
@@ -140,6 +208,7 @@ DECIMALS = 3  # soil parameters keep 3 decimal places
 
 # Per-parameter decimal precision overrides
 PARAM_DECIMALS = {
+    "Ds": 4,
     "velocity": 2,
     "diffusivity": 0,
 }
@@ -164,29 +233,53 @@ def clamp(v: float, lo: float, hi: float) -> float:
 def normalize_params(
     params: Dict[str, float],
     ranges: Optional[Dict[str, Tuple[float, float]]] = None,
+    param_keys: Optional[List[str]] = None,
 ) -> Dict[str, float]:
-    """Normalize parameters: clamp to range, enforce constraints, round."""
+    """Normalize parameters: clamp to range, enforce constraints, round.
+
+    ``param_keys`` selects which keys to normalize. The default covers every
+    known key (VIC+routing, CaMa-Flood, SWAT+) present in either the supplied
+    ranges or ``params``, so each combination's parameter set survives
+    normalization. Unrecognized keys pass through (with a warning) rather
+    than being dropped.
+    """
     rng = ranges or DEFAULT_RANGES
     out: Dict[str, float] = {}
 
-    for k in PARAM_KEYS:
-        lo, hi = rng.get(k, DEFAULT_RANGES[k])
+    # A key is normalized when the combination's ranges carry it (vic_routing
+    # configs carry no CaMa/SWAT keys in param_ranges, swat configs carry no
+    # VIC keys) or when the candidate itself supplies a value for it.
+    if param_keys is None:
+        keys = [k for k in ALL_PARAM_KEYS if k in rng or k in params]
+    else:
+        keys = list(param_keys)
+
+    for k in keys:
+        bounds = rng.get(k) or DEFAULT_RANGES.get(k)
+        if bounds is None:
+            if k in params:
+                out[k] = float(params[k])
+            continue
+        lo, hi = bounds
         out[k] = clamp(float(params.get(k, (lo + hi) / 2)), lo, hi)
 
-    # CaMa-Flood channel params (vic_cama_flood combination): normalize only
-    # when present in the supplied ranges, so vic_routing configs — which carry
-    # no CaMa keys in param_ranges — keep bit-identical behaviour.
-    for k in CAMA_PARAM_KEYS:
-        if k in rng:
-            lo, hi = rng[k]
-            out[k] = clamp(float(params.get(k, (lo + hi) / 2)), lo, hi)
+    # Unrecognized keys pass through instead of vanishing
+    for k, v in params.items():
+        if k in out or k in keys:
+            continue
+        logger.warning("normalize_params: unrecognized param %s passed through", k)
+        try:
+            out[k] = float(v)
+        except (TypeError, ValueError):
+            pass
 
     # Enforce minimum non-zero values
     for k, min_val in MIN_NONZERO.items():
-        out[k] = max(out[k], min_val)
+        if k in out:
+            out[k] = max(out[k], min_val)
 
     # Enforce soil_d3 > soil_d2
-    if out["soil_d3"] <= out["soil_d2"]:
+    if "soil_d2" in out and "soil_d3" in out and out["soil_d3"] <= out["soil_d2"]:
         lo3, hi3 = rng.get("soil_d3", DEFAULT_RANGES["soil_d3"])
         out["soil_d3"] = clamp(out["soil_d2"] + 0.05, lo3, hi3)
         # If still not valid, try adjusting soil_d2 down
@@ -198,7 +291,7 @@ def normalize_params(
     out = {k: round(v, PARAM_DECIMALS.get(k, DECIMALS)) for k, v in out.items()}
 
     # Final check after rounding
-    if out["soil_d3"] <= out["soil_d2"]:
+    if "soil_d2" in out and "soil_d3" in out and out["soil_d3"] <= out["soil_d2"]:
         out["soil_d3"] = round(out["soil_d2"] + 0.05, DECIMALS)
 
     return out
@@ -375,8 +468,18 @@ class ValidationResult:
         }
 
 
-def validate_leader_output(data: Dict[str, Any]) -> ValidationResult:
-    """Validate leader LLM output against expected schema."""
+def validate_leader_output(
+    data: Dict[str, Any],
+    expected_subbasins: Optional[List[str]] = None,
+    allowed_params: Optional[List[str]] = None,
+) -> ValidationResult:
+    """Validate leader LLM output against expected schema.
+
+    When ``expected_subbasins`` is provided, every listed basin must appear in
+    worker_guidance and unknown subbasin ids become errors. When
+    ``allowed_params`` is provided, parameter names outside it become errors.
+    With both left as None, legacy (warning-only) behaviour is preserved.
+    """
     result = ValidationResult()
 
     if not isinstance(data, dict):
@@ -395,6 +498,9 @@ def validate_leader_output(data: Dict[str, Any]) -> ValidationResult:
     if data.get("stop_or_continue") not in ("continue", "stop"):
         result.add_warning(f"Invalid stop_or_continue value: {data.get('stop_or_continue')}")
 
+    expected_set = set(str(b) for b in expected_subbasins) if expected_subbasins is not None else None
+    seen_basins: set = set()
+
     guidance = data.get("worker_guidance", [])
     if not isinstance(guidance, list):
         result.add_error("worker_guidance must be an array")
@@ -404,6 +510,12 @@ def validate_leader_output(data: Dict[str, Any]) -> ValidationResult:
             id_keys = ("subbasin_id", "basin_id", "basin", "worker_name", "name", "worker_id")
             if not any(k in g for k in id_keys):
                 result.add_warning(f"worker_guidance[{i}] missing subbasin identifier")
+            else:
+                gid = next(str(g[k]) for k in id_keys if k in g)
+                if expected_set is not None and gid not in expected_set:
+                    result.add_error(f"worker_guidance[{i}] unknown subbasin: {gid}")
+                else:
+                    seen_basins.add(gid)
             # param_adjustments may use alternative names or be free-text instructions
             adj_keys = ("param_adjustments", "adjustments", "parameter_adjustments",
                         "parameter_updates", "parameter_adjustment")
@@ -425,10 +537,17 @@ def validate_leader_output(data: Dict[str, Any]) -> ValidationResult:
             else:
                 for adj in adj_list:
                     param_name = adj.get("param") or adj.get("parameter") or adj.get("parameter_name") or adj.get("param_name") or adj.get("name")
-                    if param_name not in PARAM_KEYS:
+                    if allowed_params is not None:
+                        if param_name not in allowed_params:
+                            result.add_error(f"worker_guidance[{i}] unknown param: {param_name}")
+                    elif param_name not in PARAM_KEYS:
                         result.add_warning(f"worker_guidance[{i}] unknown param: {param_name}")
                     if adj.get("direction") not in ("increase", "decrease", "hold"):
                         result.add_warning(f"worker_guidance[{i}] invalid direction: {adj.get('direction')}")
+
+    if expected_set is not None:
+        for b in sorted(expected_set - seen_basins):
+            result.add_error(f"worker_guidance missing expected basin: {b}")
 
     return result
 

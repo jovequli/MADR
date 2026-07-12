@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -18,6 +19,8 @@ from .param_validator import (
     PARAM_KEYS,
     SOIL_PARAM_KEYS,
     ROUTING_PARAM_KEYS,
+    CAMA_PARAM_KEYS,
+    SWAT_PARAM_KEYS,
     DEFAULT_RANGES,
     CalibrationPhase,
     get_tunable_keys,
@@ -41,6 +44,27 @@ def _load_text(path: Path) -> str:
 
 def _load_json(path: Path) -> Dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+# Trajectory table columns per model combination: (param_key, header, fmt).
+# vic_routing must stay byte-identical to the legacy 8-param layout.
+# swat columns are built dynamically from the varied params (see
+# LeaderMemory._varied_swat_columns).
+TRAJECTORY_COLUMNS: Dict[str, List[Tuple[str, str, str]]] = {
+    "vic_routing": [
+        ("binfilt", "binfilt", ".3f"), ("Ds", "Ds", ".4f"),
+        ("Dsmax", "Dsmax", ".1f"), ("Ws", "Ws", ".2f"),
+        ("soil_d2", "d2", ".2f"), ("soil_d3", "d3", ".2f"),
+        ("velocity", "vel", ".2f"), ("diffusivity", "diff", ".0f"),
+    ],
+    "vic_cama_flood": [
+        ("binfilt", "binfilt", ".3f"), ("Ds", "Ds", ".4f"),
+        ("Dsmax", "Dsmax", ".1f"), ("Ws", "Ws", ".2f"),
+        ("soil_d2", "d2", ".2f"), ("soil_d3", "d3", ".2f"),
+        ("Hc", "Hc", ".3f"), ("Hmin", "Hmin", ".3f"),
+        ("Wc", "Wc", ".3f"), ("Wmin", "Wmin", ".3f"),
+    ],
+}
 
 
 # ---------------------------------------------------------------------------
@@ -145,11 +169,48 @@ class LeaderMemory:
                 lines.append(f"  Strategy: {strategy}")
         return "\n".join(lines)
 
-    def format_param_trajectory_for_joint(self, n_recent: int = 10) -> str:
+    @staticmethod
+    def _varied_swat_columns(
+        recent_rounds: List[Dict[str, Any]], max_cols: int = 10,
+    ) -> List[Tuple[str, str, str]]:
+        """Pick SWAT params whose values changed across the recorded rounds.
+
+        With 18 SWAT+ params a full table is too wide; show only the params
+        that actually moved (per basin, across rounds), capped at max_cols.
+        Falls back to the first max_cols known params when nothing varied yet.
+        """
+        values: Dict[Tuple[str, str], set] = {}
+        keys_seen: List[str] = []
+        for entry in recent_rounds:
+            for wr in entry.get("worker_results", []):
+                sid = wr.get("subbasin_id", "")
+                p = wr.get("best_params", wr.get("params", {}))
+                for k, v in p.items():
+                    try:
+                        fv = round(float(v), 6)
+                    except (ValueError, TypeError):
+                        continue
+                    values.setdefault((sid, k), set()).add(fv)
+                    if k not in keys_seen:
+                        keys_seen.append(k)
+        # Canonical order first, then any extra recorded keys
+        ordered = [k for k in SWAT_PARAM_KEYS if k in keys_seen]
+        ordered += [k for k in keys_seen if k not in SWAT_PARAM_KEYS]
+        varied = [
+            k for k in ordered
+            if any(len(vals) > 1 for (sid, key), vals in values.items() if key == k)
+        ]
+        keys = (varied or ordered)[:max_cols]
+        return [(k, k, ".4g") for k in keys]
+
+    def format_param_trajectory_for_joint(
+        self, n_recent: int = 10, model_combination: Optional[str] = None,
+    ) -> str:
         """Format per-basin parameter trajectory for JOINT phase fine-tuning.
 
-        Shows the last n_recent rounds with all 8 params + NSE per basin,
-        so the Leader can reason about which directions worked.
+        Shows the last n_recent rounds with the combination's tunable params
+        + NSE per basin, so the Leader can reason about which directions
+        worked. Columns follow model_combination (default: vic_routing).
         """
         if not self.rounds:
             return ""
@@ -171,6 +232,14 @@ class LeaderMemory:
         if not basin_ids:
             return ""
 
+        # Select param columns for the active model combination
+        combo = model_combination or "vic_routing"
+        if combo == "swat":
+            columns = self._varied_swat_columns(recent_rounds)
+        else:
+            columns = TRAJECTORY_COLUMNS.get(combo, TRAJECTORY_COLUMNS["vic_routing"])
+        header = "R|" + "|".join(label for _, label, _ in columns) + "|NSE|PBIAS"
+
         def _f(v, fmt):
             if v is None:
                 return "?"
@@ -185,7 +254,7 @@ class LeaderMemory:
         chunks = []
         for sid in basin_ids:
             chunks.append(f"### {sid}")
-            chunks.append("R|binfilt|Ds|Dsmax|Ws|d2|d3|vel|diff|NSE|PBIAS")
+            chunks.append(header)
             for entry in recent_rounds:
                 rid = entry.get("round_id", "?")
                 result_by_sid = {wr["subbasin_id"]: wr for wr in entry.get("worker_results", [])}
@@ -194,13 +263,11 @@ class LeaderMemory:
                     continue
                 p = wr.get("best_params", wr.get("params", {}))
                 m = wr.get("metrics", {})
-                chunks.append(
-                    f"{rid}|{_f(p.get('binfilt'), '.3f')}|{_f(p.get('Ds'), '.4f')}|"
-                    f"{_f(p.get('Dsmax'), '.1f')}|{_f(p.get('Ws'), '.2f')}|"
-                    f"{_f(p.get('soil_d2'), '.2f')}|{_f(p.get('soil_d3'), '.2f')}|"
-                    f"{_f(p.get('velocity'), '.2f')}|{_f(p.get('diffusivity'), '.0f')}|"
-                    f"{_f(m.get('NSE'), '.3f')}|{_f(m.get('PBIAS'), '.1f')}"
-                )
+                cells = [f"{rid}"]
+                cells += [_f(p.get(key), fmt) for key, _, fmt in columns]
+                cells.append(_f(m.get('NSE'), '.3f'))
+                cells.append(_f(m.get('PBIAS'), '.1f'))
+                chunks.append("|".join(cells))
             chunks.append("")
         return "\n".join(chunks)
 
@@ -372,6 +439,9 @@ class LeaderAgent:
         stop_rules: Dict[str, Any],
         param_ranges: Optional[Dict[str, list]] = None,
         model_combination: Optional[str] = None,
+        topology_note: str = "",
+        n_basins: Optional[int] = None,
+        outlet_id: str = "",
     ):
         self.agent_id = agent_id
         self.llm = llm_client
@@ -402,8 +472,21 @@ class LeaderAgent:
         if param_knowledge_path.exists():
             self.system_prompt += "\n\n" + _load_text(param_knowledge_path)
 
+        # Substitute topology placeholders in the system prompt. str.replace
+        # is a no-op for files without the tokens; when no topology info was
+        # provided, tokens collapse to a generic pointer sentence.
+        generic = ("The basin set and routing topology for this run "
+                   "are given in the round context.")
+        for token, value in (
+            ("{{BASIN_TOPOLOGY}}", topology_note or generic),
+            ("{{N_BASINS}}", str(n_basins) if n_basins is not None else generic),
+            ("{{OUTLET_ID}}", outlet_id or generic),
+        ):
+            self.system_prompt = self.system_prompt.replace(token, value)
+
         # Load schema for validation
-        self.output_schema = _load_json(SCHEMAS_DIR / "leader_output.json")
+        schema_path = SCHEMAS_DIR / "leader_output.json"
+        self.output_schema = _load_json(schema_path) if schema_path.exists() else None
 
     def compute_global_score(
         self, worker_results: List[Dict],
@@ -427,11 +510,15 @@ class LeaderAgent:
                 all_nses.append(nse)
                 if sid in outlet_ids:
                     outlet_nses.append(nse)
-                pr = m.get("peak_ratio", 1.0)
-                lr = m.get("lowflow_ratio", 1.0)
-                if isinstance(pr, (int, float)) and pr == pr:
+                # Skip missing or non-finite ratios instead of defaulting to a
+                # perfect 1.0 (which would dilute the consistency penalty).
+                # The SWAT runner does not compute these ratios yet; the real
+                # fix (computing them) lives runner-side.
+                pr = m.get("peak_ratio")
+                lr = m.get("lowflow_ratio")
+                if isinstance(pr, (int, float)) and math.isfinite(pr):
                     consistency_terms.append(abs(pr - 1.0))
-                if isinstance(lr, (int, float)) and lr == lr:
+                if isinstance(lr, (int, float)) and math.isfinite(lr):
                     consistency_terms.append(abs(lr - 1.0))
 
         mean_all = sum(all_nses) / len(all_nses) if all_nses else 0.0
@@ -454,17 +541,38 @@ class LeaderAgent:
         phase: Optional[CalibrationPhase] = None,
         rounds_in_current_phase: int = 0,
         diagnostics_block: Optional[str] = None,
+        expected_subbasins: Optional[List[str]] = None,
     ) -> Tuple[str, str, float, float, float, float]:
         """Build the review prompt without calling the LLM.
 
         V3: Uses full history table instead of verbose per-round blocks.
         Removes centers/radii/weights/stop_rules JSON (saves ~750 tokens).
 
+        When ``expected_subbasins`` is provided and any listed basin is missing
+        from worker_results or has a non-finite NSE, the round is invalidated:
+        mean_sub_nse and j_total become NaN. Otherwise a crashed low-NSE site
+        drops out of the mean's denominator and the mean can *increase*. NaN
+        propagates as not-an-improvement (nan > best is False), so the round
+        can never become best and patience counters still increment.
+        Default None keeps legacy behaviour.
+
         Returns:
             (review_prompt, system_prompt, j_total, outlet_nse, mean_sub_nse, consistency_penalty)
         """
         j_total, outlet_nse, mean_sub_nse, consistency_penalty = \
             self.compute_global_score(worker_results)
+
+        failed_basins: List[str] = []
+        if expected_subbasins is not None:
+            result_by_sid = {wr.get("subbasin_id"): wr for wr in worker_results}
+            for sid in expected_subbasins:
+                wr = result_by_sid.get(sid)
+                nse = wr.get("metrics", {}).get("NSE") if wr else None
+                if not (isinstance(nse, (int, float)) and math.isfinite(nse)):
+                    failed_basins.append(sid)
+            if failed_basins:
+                mean_sub_nse = float("nan")
+                j_total = float("nan")
 
         # Diagnostics for current round (from LeaderCoordinator)
         if diagnostics_block:
@@ -475,6 +583,8 @@ class LeaderAgent:
         # Full history table (all rounds, compact)
         history_table = self.memory.format_full_history_table()
 
+        # NOTE: NaN j_total/mean_sub_nse format safely as "nan" via the
+        # template's {j_total:.5f}-style fields — no crash.
         review_prompt = self.review_template.format(
             round_id=round_id,
             worker_results_block=results_block,
@@ -484,10 +594,25 @@ class LeaderAgent:
             mean_sub_nse=mean_sub_nse,
         )
 
+        if failed_basins:
+            review_prompt += (
+                f"\nWARNING: Round {round_id} is INVALID — these basins failed "
+                f"(missing result or non-finite NSE): {', '.join(failed_basins)}. "
+                "J_total and mean_sub_NSE are NaN for this round. Treat it as a "
+                "failed round, NOT a mediocre one; do not draw conclusions about "
+                "parameter directions from this round's global score.\n"
+            )
+
         # Phase context (compact)
         if phase:
-            tunable = get_tunable_keys(phase)
-            locked = get_locked_keys(phase)
+            # Combination-aware tunable/locked lists; fall back to the legacy
+            # signature if param_validator is not combination-aware yet.
+            try:
+                tunable = get_tunable_keys(phase, model_combination=self.model_combination)
+                locked = get_locked_keys(phase, model_combination=self.model_combination)
+            except TypeError:
+                tunable = get_tunable_keys(phase)
+                locked = get_locked_keys(phase)
             review_prompt += (
                 f"\nPhase: {phase.value} (round {rounds_in_current_phase}). "
                 f"Tunable: {', '.join(tunable)}. "
@@ -506,12 +631,13 @@ class LeaderAgent:
                 )
             elif phase == CalibrationPhase.JOINT:
                 review_prompt += (
-                    "JOINT: Fine-tune all 8 params. Small adjustments. "
+                    f"JOINT: Fine-tune all {len(tunable)} params. Small adjustments. "
                     "Always continue.\n"
                 )
                 # During JOINT, inject per-basin parameter trajectory
                 # so the Leader can see what has been tried.
-                param_trajectory = self.memory.format_param_trajectory_for_joint(n_recent=10)
+                param_trajectory = self.memory.format_param_trajectory_for_joint(
+                    n_recent=10, model_combination=self.model_combination)
                 if param_trajectory:
                     review_prompt += "\n## Recent Parameter Trajectory (last 10 rounds)\n"
                     review_prompt += param_trajectory + "\n"
@@ -527,6 +653,7 @@ class LeaderAgent:
         phase: Optional[CalibrationPhase] = None,
         rounds_in_current_phase: int = 0,
         diagnostics_block: Optional[str] = None,
+        expected_subbasins: Optional[List[str]] = None,
     ) -> Tuple[Dict[str, Any], LLMResponse]:
         """Have the leader LLM review the round and produce guidance.
 
@@ -544,6 +671,7 @@ class LeaderAgent:
                 phase=phase,
                 rounds_in_current_phase=rounds_in_current_phase,
                 diagnostics_block=diagnostics_block,
+                expected_subbasins=expected_subbasins,
             )
 
         # Build conversation messages
@@ -557,6 +685,7 @@ class LeaderAgent:
             llm_resp = self.llm.chat(
                 messages=messages,
                 system=self.system_prompt,
+                json_schema=self.output_schema,
             )
             # Validate and parse
             decision = llm_resp.parsed
@@ -711,8 +840,11 @@ class LeaderAgent:
         # No early stopping — all phases run their full allocated rounds
         phase_rec = "stay"
 
-        # Build per-worker guidance (simple rule-based)
-        locked = set(get_locked_keys(phase)) if phase else set()
+        # Build per-worker guidance (simple rule-based, per model combination)
+        try:
+            locked = set(get_locked_keys(phase, model_combination=self.model_combination)) if phase else set()
+        except TypeError:
+            locked = set(get_locked_keys(phase)) if phase else set()
         guidance = []
         improved = j_total > (self.memory.j_history[-1] if self.memory.j_history else float("-inf"))
         for wr in worker_results:
@@ -724,21 +856,73 @@ class LeaderAgent:
             lr = m.get("lowflow_ratio", 1.0)
             pbias = m.get("PBIAS", 0.0)
 
-            if "binfilt" not in locked:
-                if isinstance(pr, (int, float)) and pr > 1.05:
-                    adjustments.append({"param": "binfilt", "direction": "decrease", "magnitude": "small", "reasoning": "Peak too high"})
-                elif isinstance(pr, (int, float)) and pr < 0.95:
-                    adjustments.append({"param": "binfilt", "direction": "increase", "magnitude": "small", "reasoning": "Peak too low"})
-
-            if "Ds" not in locked:
+            if self.model_combination == "swat":
+                # SWAT+ menu (prompts/swat/param_knowledge_leader.md).
+                # Canonical PBIAS = 100*sum(sim-obs)/sum(obs): positive = too wet.
+                param_menu = list(SWAT_PARAM_KEYS)
+                if "cn2" not in locked and isinstance(pbias, (int, float)) and math.isfinite(pbias):
+                    if pbias > 10.0:
+                        adjustments.append({"param": "cn2", "direction": "decrease", "magnitude": "small", "reasoning": "Too wet (PBIAS > +10): reduce runoff (pctchg)"})
+                    elif pbias < -10.0:
+                        adjustments.append({"param": "cn2", "direction": "increase", "magnitude": "small", "reasoning": "Too dry (PBIAS < -10): increase runoff (pctchg)"})
+                if "surlag" not in locked:
+                    if isinstance(pr, (int, float)) and pr > 1.05:
+                        adjustments.append({"param": "surlag", "direction": "increase", "magnitude": "small", "reasoning": "Peak too high"})
+                    elif isinstance(pr, (int, float)) and pr < 0.95:
+                        adjustments.append({"param": "surlag", "direction": "decrease", "magnitude": "small", "reasoning": "Peak too low"})
+                # Low-flow menu follows the unified rule (worker_diagnostics /
+                # prompts/swat/param_knowledge_leader.md): no unconditional
+                # perco moves — with deep_seep > 0, raising perco routes water
+                # to deep-storage losses and collapses streamflow (verified in
+                # a real run); probe perco individually before recommending it.
                 if isinstance(lr, (int, float)) and lr < 0.9:
-                    adjustments.append({"param": "Ds", "direction": "increase", "magnitude": "small", "reasoning": "Low flow too low"})
+                    if "flo_min" not in locked:
+                        adjustments.append({"param": "flo_min", "direction": "increase", "magnitude": "small", "reasoning": "Low flow too low: increase flo_min for baseflow"})
+                    if "deep_seep" not in locked:
+                        adjustments.append({"param": "deep_seep", "direction": "decrease", "magnitude": "small", "reasoning": "Low flow too low: keep aquifer recharge in the stream"})
                 elif isinstance(lr, (int, float)) and lr > 1.1:
-                    adjustments.append({"param": "Ds", "direction": "decrease", "magnitude": "small", "reasoning": "Low flow too high"})
+                    if "flo_min" not in locked:
+                        adjustments.append({"param": "flo_min", "direction": "decrease", "magnitude": "small", "reasoning": "Low flow too high: decrease flo_min to reduce baseflow"})
+                    if "deep_seep" not in locked:
+                        adjustments.append({"param": "deep_seep", "direction": "increase", "magnitude": "small", "reasoning": "Low flow too high: divert recharge to deep storage"})
+            else:
+                # VIC-based combinations share the soil-parameter heuristics.
+                if self.model_combination == "vic_cama_flood":
+                    param_menu = list(SOIL_PARAM_KEYS) + list(CAMA_PARAM_KEYS)
+                else:
+                    # vic_routing — identical to legacy behaviour.
+                    param_menu = list(PARAM_KEYS)
+
+                if "binfilt" not in locked:
+                    if isinstance(pr, (int, float)) and pr > 1.05:
+                        adjustments.append({"param": "binfilt", "direction": "decrease", "magnitude": "small", "reasoning": "Peak too high"})
+                    elif isinstance(pr, (int, float)) and pr < 0.95:
+                        adjustments.append({"param": "binfilt", "direction": "increase", "magnitude": "small", "reasoning": "Peak too low"})
+
+                if "Ds" not in locked:
+                    if isinstance(lr, (int, float)) and lr < 0.9:
+                        adjustments.append({"param": "Ds", "direction": "increase", "magnitude": "small", "reasoning": "Low flow too low"})
+                    elif isinstance(lr, (int, float)) and lr > 1.1:
+                        adjustments.append({"param": "Ds", "direction": "decrease", "magnitude": "small", "reasoning": "Low flow too high"})
+
+                if self.model_combination == "vic_cama_flood":
+                    # Channel menu (prompts/vic_cama_flood/param_knowledge_leader.md):
+                    # Wc is the dominant storage lever; Hc drives wave speed.
+                    if "Wc" not in locked:
+                        if isinstance(pr, (int, float)) and pr > 1.05:
+                            adjustments.append({"param": "Wc", "direction": "increase", "magnitude": "small", "reasoning": "Peak too high: wider channels attenuate peaks"})
+                        elif isinstance(pr, (int, float)) and pr < 0.95:
+                            adjustments.append({"param": "Wc", "direction": "decrease", "magnitude": "small", "reasoning": "Peak too low: narrower channels are flashier"})
+                    pt = m.get("peak_timing_bias_days")
+                    if "Hc" not in locked and isinstance(pt, (int, float)) and math.isfinite(pt):
+                        if pt < -0.5:
+                            adjustments.append({"param": "Hc", "direction": "increase", "magnitude": "small", "reasoning": "Peaks early: deeper channels slow the wave"})
+                        elif pt > 0.5:
+                            adjustments.append({"param": "Hc", "direction": "decrease", "magnitude": "small", "reasoning": "Peaks late: shallower channels speed the wave"})
 
             # Fill remaining params with "hold"
             adj_params = {a["param"] for a in adjustments}
-            for pk in PARAM_KEYS:
+            for pk in param_menu:
                 if pk not in adj_params:
                     if pk in locked:
                         adjustments.append({"param": pk, "direction": "hold", "magnitude": "none", "reasoning": "Locked in current phase"})

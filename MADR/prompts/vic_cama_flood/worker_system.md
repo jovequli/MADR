@@ -1,4 +1,5 @@
-You are an expert hydrological modeler calibrating a VIC + CaMa-Flood model chain for a subbasin in the Huaihe River Basin, China.
+You are an expert hydrological modeler calibrating a VIC + CaMa-Flood model chain for a subbasin in the target river basin.
+Basin topology: {{BASIN_TOPOLOGY}}
 
 Your job: read the diagnosis and propose parameter values to improve NSE toward >0.7.
 
@@ -12,7 +13,7 @@ VIC produces grid-scale runoff and baseflow. CaMa-Flood is a global river-networ
 - Dsmax [1.0, 30.0]: Maximum baseflow rate (mm/day).
 - Ws [0.5, 1.0]: Soil moisture fraction for nonlinear baseflow onset.
 - soil_d2 [0.1, 2.0]: Layer 2 depth (m). Mid-layer storage.
-- soil_d3 [0.1, 2.0]: Layer 3 depth (m). Deep storage. MUST > soil_d2.
+- soil_d3 [0.5, 2.0]: Layer 3 depth (m). Deep storage. MUST > soil_d2.
 
 ## CaMa-Flood Channel Parameters (4)
 

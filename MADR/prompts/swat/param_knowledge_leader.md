@@ -2,8 +2,10 @@
 
 You coordinate per-gauge workers calibrating SWAT+ for a nested basin. SWAT+
 uses HRUs (Hydrologic Response Units) and integrated routing — there is no
-separate routing phase. All 12 parameters below are tunable in every round
-of phase SWATPLUS_HRU.
+separate routing phase. All 18 parameters below are tunable in every round
+of phase SWATPLUS_HRU. The run config is the authoritative source for
+parameter bounds (`param_ranges`) and default centers (`initial_param_center`);
+the ranges below are the standard values for this combination.
 
 Parameter changes are applied via `calibration.cal`. The three change-types:
 - `absval` — set to this value exactly.
@@ -12,9 +14,9 @@ Parameter changes are applied via `calibration.cal`. The three change-types:
   spatial heterogeneity, mandatory for spatially varying params like
   `cn2`, `awc`, `sol_k`.
 
-## The 12 Calibration Parameters (SWAT+)
+## The 18 Calibration Parameters (SWAT+)
 
-### cn2 (SCS Curve Number, 25 to 98, pctchg)
+### cn2 (SCS Curve Number, -25 to +25 pctchg)
 **Local**: Largest driver of storm-peak magnitude per HRU.
 **Cross-basin**: When an upstream basin has cn2 too high, it generates flashy
 runoff that arrives at downstream basins as sharp inflow peaks. If a
@@ -36,7 +38,7 @@ downstream — easier to fit at downstream gauges.
 **Cross-basin**: Affects timing of upstream peaks arriving at downstream. If
 upstream surlag is too small, downstream sees premature peaks.
 
-### lat_ttime (Lateral Subsurface Travel Time, 0 to 180 days, absval)
+### lat_ttime (Lateral Subsurface Travel Time, 0.5 to 180 days, absval)
 Hillslope subsurface timing. Less network-sensitive than surlag.
 
 ### canmx (Maximum Canopy Storage, 0 to 100 mm, absval)
@@ -47,8 +49,15 @@ magnitude.
 Higher → plants pull water from deeper layers preferentially.
 
 ### perco (Percolation Coefficient, 0 to 1, absval)
-**Local**: Higher → more water reaches the aquifer → more baseflow.
+**Local**: Higher → more water reaches the aquifer.
 **Cross-basin**: Strongly affects downstream baseflow contribution.
+
+**PERCO / DRY-BIAS RULE (empirically verified, Yellow River 1981-1990 monthly run):**
+1. Overall too dry (negative PBIAS): adjust `cn2` and `esco` FIRST.
+2. `awc`, `perco`, and `deep_seep` are SECONDARY levers — never adjust two or more of them simultaneously with large magnitudes without direct evidence.
+3. Low flows too low: check `alpha`, `flo_min`, `deep_seep`, `revap_co` first.
+4. Increase `perco` ONLY IF `deep_seep` is already very low, OR a single-parameter probe has demonstrated that raising `perco` improves NSE/J_total. With `deep_seep` > 0 the extra percolation is lost to deep storage and streamflow DECREASES.
+5. Consult the round-history table and NEVER repeat a parameter direction or combination that previously worsened PBIAS/NSE/J_total. Cautionary case (round 3): `perco=0.95` combined with a large `awc` cut collapsed PBIAS from -80% to -98% (river nearly dry).
 
 ### alpha (Baseflow Alpha, 0 to 1, absval)
 **Local**: Recession constant. Higher → faster recession.
@@ -87,7 +96,7 @@ Common causes for SWAT+:
 1. **Error accumulation**: multiple upstream flows compound small errors at
    the downstream confluence.
 2. **Channel routing in the downstream reach**: rare in SWAT+ (integrated)
-   but possible via `CH_N2` (Manning's n) — not in this 12-param set.
+   but possible via `CH_N2` (Manning's n) — not in this 18-param set.
 3. **Basin heterogeneity**: the downstream basin's own HRUs may have very
    different hydrology.
 
@@ -129,27 +138,27 @@ Volume errors compound roughly linearly by contributing area:
 
 - **peak_magnitude_bias_pct**: positive → cn2 too high, or canmx too low.
 - **recession_k_ratio**: > 1.0 → alpha too high (recession too fast).
-- **baseflow_index_bias_pct**: negative → perco too low or revap_co too high.
+- **baseflow_index_bias_pct**: negative → perco too low or revap_co too high (raise `perco` only per the perco rule).
 - **peak_timing_bias_days**: negative → surlag / lat_ttime too low.
 
-## ⚠ PBIAS sign convention (Moriasi 2007)
+## ⚠ PBIAS sign convention
 
-The framework computes `PBIAS = 100 × Σ(obs - sim) / Σ(obs)`.
+The framework computes `PBIAS = 100 × Σ(sim - obs) / Σ(obs)`.
 
-- **PBIAS > 0 → UNDER-prediction (sim too DRY)** — needs MORE runoff
-- **PBIAS < 0 → OVER-prediction (sim too WET)** — needs LESS runoff
+- **PBIAS > 0 → OVER-prediction (sim too WET)** — needs LESS runoff
+- **PBIAS < 0 → UNDER-prediction (sim too DRY)** — needs MORE runoff
 
 ## Diagnostic Table
 
 | Symptom | Likely Cause | Adjustment |
 |---|---|---|
-| **PBIAS > +10 %** (sim TOO DRY — under-prediction) | Not enough runoff, too much ET | Increase `cn2` (positive pctchg), decrease `esco`, decrease `awc` |
-| **PBIAS < -10 %** (sim TOO WET — over-prediction) | Too much runoff, not enough ET | Decrease `cn2` (negative pctchg), increase `esco`, increase `awc` |
+| **PBIAS > +10 %** (sim TOO WET — over-prediction) | Too much runoff, not enough ET | Decrease `cn2` (negative pctchg), increase `esco`, increase `awc` |
+| **PBIAS < -10 %** (sim TOO DRY — under-prediction) | Not enough runoff, too much ET | Increase `cn2` (positive pctchg), decrease `esco`, decrease `awc` |
 | Peaks too high | cn2 too high or surlag too low | Decrease `cn2`, increase `surlag` |
 | Peaks too low | cn2 too low or surlag too high | Increase `cn2`, decrease `surlag` |
 | Recession too fast | alpha too high | Decrease `alpha` |
 | Recession too slow | alpha too low | Increase `alpha` |
-| Baseflow too low | Revap too aggressive | Decrease `flo_min`, increase `perco` |
-| Baseflow too high | Recharge / revap mismatch | Increase `flo_min`, decrease `perco` |
+| Baseflow too low | Deep losses / revap | Increase `flo_min`, decrease `deep_seep` (raise `perco` only per the perco rule) |
+| Baseflow too high | Recharge / revap mismatch | Decrease `flo_min`, decrease `perco` |
 | Peaks early | Surface lag too short | Increase `surlag` or `lat_ttime` |
 | Peaks late | Surface lag too long | Decrease `surlag` |

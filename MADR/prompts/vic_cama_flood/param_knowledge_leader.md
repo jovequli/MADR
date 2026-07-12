@@ -1,5 +1,7 @@
 # Parameter Knowledge for Leader Agent (VIC + CaMa-Flood)
 
+The binding parameter bounds always come from the run config's `param_ranges`; the ranges below are the standard values for this combination.
+
 ## VIC Soil Parameters — Cross-Basin Impact
 
 ### binfilt (Variable Infiltration Curve, 0.001–0.4)
@@ -36,12 +38,15 @@ Qave per cell using power laws:
 - Width `W = max(Wmin, Wc · Qave^0.6)`
 
 You tune the 4 coefficients/floors. Other channel parameters (manning,
-floodplain elevation profile, bifurcation) stay at defaults baked into the
-prepared `bengbu_15min` basin map.
+floodplain elevation profile, bifurcation) stay at defaults baked into each
+basin's prepared map (the `basin_map` named in the run config). Each worker's
+Hc/Hmin/Wc/Wmin are written into that worker's own basin map, so channel
+proposals are per-reach, not network-global (see "Channel Parameter Scope"
+below).
 
 ### Hc (Channel Depth Coefficient, 0.01–1)
 **Local**: Scales channel depth with discharge climatology. Higher Hc → deeper channels everywhere → more in-channel volume before overbank; slower kinematic wave (slower peak arrival, more attenuation).
-**Cross-basin**: Hc operates on the whole network. Increasing it slows large rivers more than small ones because `Qave^0.5` is larger downstream. A single basin's tuning of Hc affects the routing of all upstream contributions.
+**Cross-basin**: Hc operates on the basin's own reach network (upstream-locked reach cells keep their calibrated geometry). Increasing it slows large rivers more than small ones because `Qave^0.5` is larger downstream. A downstream basin's Hc still shapes how inflow from upstream reaches is routed once it enters that basin's own reach.
 
 ### Hmin (Minimum Channel Depth, 0.5–2 m)
 **Local**: Floor on channel depth in headwater / low-Qave cells.
@@ -58,7 +63,7 @@ prepared `bengbu_15min` basin map.
 ## Strategic Guidance
 
 ### When All Basins Show Similar Issues
-If most sub-basins show the same problem (e.g., all have peak_ratio > 1.0), this suggests a systematic parameter issue. Recommend uniform VIC adjustments to all workers, or a global channel adjustment, rather than basin-specific fine-tuning.
+If most sub-basins show the same problem (e.g., all have peak_ratio > 1.0), this suggests a systematic parameter issue. Recommend uniform VIC adjustments to all workers, or the same channel adjustment applied by every worker to its own reach, rather than basin-specific fine-tuning.
 
 ### When Upstream Performs Well but Downstream Performs Poorly
 Common causes in the VIC+CaMa-Flood chain:
@@ -73,9 +78,9 @@ Common causes in the VIC+CaMa-Flood chain:
 ### Oscillation Detection
 If a basin's NSE alternates between improving and declining across rounds, recommend shrinking the search radius or advancing to the next phase.
 
-## Parameter Sensitivity Ranking (Huaihe Basin)
+## Parameter Sensitivity Ranking (typical; climate-dependent)
 
-VIC side (semi-arid):
+VIC side:
 1. **binfilt** — Controls flood peaks. Adjust FIRST.
 2. **Dsmax / Ds** — Controls recession and baseflow.
 3. **Ws, soil_d2, soil_d3** — Long-term water balance.
@@ -85,11 +90,12 @@ CaMa channel side:
 2. **Hc** — Wave-speed driver. Adjust next.
 3. **Wmin, Hmin** — Headwater-specific tuning.
 
-## Huaihe Basin Priors
+## Channel Parameter Scope — Per-Reach Semantics
 
-- Semi-arid; all 5 stations share climate.
-- Headwaters XX, ZK, JJJ likely share optimal binfilt (typically 0.10–0.30).
-- Channel params (Hc/Hmin/Wc/Wmin) are GLOBAL in CaMa-Flood — they apply network-wide; do not propose basin-specific values for channel params. Worker-specific channel proposals should be averaged or only the outlet (BB) should drive channel tuning.
+- Channel params (Hc/Hmin/Wc/Wmin) are PER-BASIN: the executor writes each worker's values into that worker's own basin map and regenerates that map's channel geometry, so a worker's channel proposal applies only to its own reach.
+- When a downstream basin runs, the upstream reaches inside its grid are LOCKED: the executor splices the upstream basins' calibrated channel geometry onto those river cells. Downstream channel tuning only changes the downstream basin's own (incremental) reach cells.
+- Therefore each worker SHOULD propose channel values for its own reach. Do NOT average channel proposals across workers, and do NOT let the outlet basin alone drive channel tuning.
+- Headwater basins that share a climate often have similar optimal binfilt; use cross-basin consistency as a soft check, not a constraint.
 
 ## Upstream Error Propagation
 

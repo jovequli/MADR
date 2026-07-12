@@ -1,17 +1,19 @@
 # MADR — Multi-Agent Diagnostic Reasoning for Distributed Hydrological Model Calibration
 
-MADR is an LLM-driven framework that calibrates distributed hydrological models in nested-basin systems. A **Leader Agent** synthesizes cross-station simulation errors into structured per-basin guidance; **Worker Agents** translate that guidance into concrete parameter sets. The framework is implemented in [LangGraph](https://github.com/langchain-ai/langgraph), runs through any major LLM provider's native SDK, and treats both the hydrological model and the LLM as pluggable components — three model combinations and seven LLM providers ship today.
+MADR is an LLM-driven framework that calibrates distributed hydrological models in nested-basin systems. A **Leader Agent** synthesizes cross-station simulation errors into structured per-basin guidance; **Worker Agents** translate that guidance into concrete parameter sets. The framework is implemented in [LangGraph](https://github.com/langchain-ai/langgraph) and treats both the hydrological model and the LLM API as pluggable components. Three hydrological-model combinations and several tested API adapters are included.
 
 In the paper, MADR approaches the calibration accuracy of two benchmark optimization algorithms (SCE-UA, NSGA-III) at less than 5% of their evaluation budget across five nested gauging stations of the Huai River basin, and Worker-level LLM reasoning consistently outperforms a deterministic rule-based executor across both Gemini and Claude.
 
 📦 **Preprint**: Zhao, Li, Zhu, Jin, Zhang (2026). *LLM-Driven Diagnostic Reasoning for Distributed Hydrological Model Calibration*. Research Square. [10.21203/rs.3.rs-10106384/v1](https://doi.org/10.21203/rs.3.rs-10106384/v1)
 📂 **Dataset**: observations, model inputs, all calibration runs, and benchmark outputs on Zenodo. [10.5281/zenodo.20622937](https://doi.org/10.5281/zenodo.20622937)
 
+> **Version note.** The initial public code release associated with the Version 1 preprint is preserved under tag [`v0.1.0`](https://github.com/jovequli/MADR/tree/v0.1.0). The default branch contains subsequent correctness and robustness updates.
+
 ## Repository contents
 
 | Folder | Purpose |
 |---|---|
-| **`MADR/`** | The framework. Three hydrological-model combinations and seven LLM providers, all behind a single LangGraph workflow. |
+| **`MADR/`** | The framework. Three hydrological-model combinations and tested LLM API adapters behind a single LangGraph workflow. |
 | **`SADR/`** | Single-Agent Diagnostic Reasoning ablation control — the Leader is retained, but the LLM-based Worker is replaced by a deterministic rule-based executor. Scope: VIC + Lohmann routing only. |
 | **`routing/`** | The Lohmann routing model Fortran source with this study's local modifications and a Makefile. Build with `cd routing && make`. |
 
@@ -55,15 +57,17 @@ Three coordination mechanisms keep the Workers consistent: **topological process
 
 MADR runs an **Exploration Stage** followed by one or more **sequential Agent Phases**. The number and content of phases are defined by the model combination — each combination ships its own phase pipeline, chosen so that successive phases isolate a tractable parameter subspace. Every phase ends as soon as either of two conditions fires:
 
-1. **Patience-based early termination** (recommended) — the in-phase mean sub-basin NSE has not improved for `patience_rounds` consecutive **single-candidate** rounds. Multi-candidate rounds are excluded from the counter so aggressive exploration does not trip the trigger.
+1. **Patience-based early termination** (recommended) — VIC-based combinations track the in-phase mean sub-basin NSE. SWAT+ tracks acceptance of the configured watershed-level joint objective. Multi-candidate rounds are excluded from the counter so aggressive exploration does not trip the trigger.
 2. **`max_rounds` cap** — a hard upper bound that always applies, providing a safety ceiling on per-phase cost.
 
 This adaptive behavior is the headline of the current build: each phase stops as soon as it plateaus, rather than always running to its full round budget.
 
 - **Exploration Stage** (before any Agent Rounds): a configurable number of simulations per sub-basin, drawn as a mix of Gaussian perturbations around the configured default and Latin Hypercube samples across the feasible range. The per-sub-basin summary (best NSE, top NSE values, best parameter combination) is injected into every Worker's prompt as fixed contextual reference and shown to the Leader once at Round 1. The exploration is **soft contextual evidence** to the LLMs; it does not modify the initial parameter center or the search radius.
-- **Multi-candidate generation** (early rounds of selected phases): every Worker is invoked three times with strategy tags `conservative` / `moderate` / `bold`; the candidate with the highest NSE is adopted as that round's proposal.
+- **Multi-candidate generation** (early rounds of selected phases): every Worker is invoked with strategy tags such as `conservative` / `moderate` / `bold`. VIC-based combinations select locally by NSE. SWAT+ evaluates each strategy in one watershed-wide run and adopts one common strategy index using `mean_nse` or `j_total` as configured.
 - **Round 1 special case**: the Worker LLM is not invoked. The model runs with the configured default parameters, providing the baseline against which the Leader's first guidance is issued.
-- **Final round (force-best)**: after the last phase ends — whether by patience or by `max_rounds` — MADR runs one mandatory final round in which each Worker uses its own per-sub-basin best historical parameters, delivering a clean end-state composite.
+- **Final round (force-best)**: after the last phase ends, VIC-based combinations restore per-basin historical best parameters. SWAT+ restores one accepted watershed-level joint bundle, so parameters from different unverified joint runs are never mixed.
+
+Both J_total and NSE are retained throughout optimization. J_total combines basin-average NSE with peak- and low-flow consistency, while station-wise and basin-average NSE remain the primary reported performance metrics.
 
 A phase entry in the pipeline looks like this (generic shape — see the Case Study below for a concrete instantiation):
 
@@ -91,9 +95,9 @@ MADR keeps the hydrological model and the LLM provider behind narrow, swappable 
 
 Adding a new combination is a four-step recipe: drop in `MADR/prompts/<combination>/` (six prompt files), implement `MADR/scripts/executors/<combination>.py` as a `ModelExecutor` subclass, register it in the factory at `MADR/scripts/executors/__init__.py`, and add a sample config under `MADR/configs/`. See `MADR/docs/architecture.md` for the design rationale.
 
-### LLM providers
+### LLM API adapters
 
-All providers below are supported out of the box by `MADR/scripts/llm_client.py`. Switching is a config-only change — modify `model`, `provider`, and `api_key_env` in the config, then set the corresponding environment variable. Provider-specific quirks (GPT-5.x / o-series `max_completion_tokens`, Kimi K2.6 temperature constraints, Kimi/Qwen proxy bypass) are handled automatically.
+The providers below are tested examples, not an exhaustive compatibility list. Switching among included adapters is config-only: modify `model`, `provider`, and `api_key_env`, then set the corresponding environment variable. Other API-accessible models—including GLM-family services and additional OpenAI- or Anthropic-compatible endpoints—can be connected through configuration or a thin transport adapter. Extending the LLM layer is primarily an API-integration task; adding a hydrological model requires a new executor, parameter semantics, model-specific diagnostic knowledge, and independent physical validation.
 
 | Provider | Example model | API key env var | `timeout_sec` | SDK |
 |---|---|---|---|---|
@@ -191,9 +195,9 @@ export ANTHROPIC_API_KEY="your-key"    # default in the shipped configs
 # or any of: GEMINI_API_KEY, OPENAI_API_KEY, DEEPSEEK_API_KEY, KIMI_API_KEY, ...
 ```
 
-### Replace local paths in the config
+### Configure model and data paths
 
-The shipped configs contain the original author's absolute paths to executables and data. **Replace them before running.** Every config has a top-level `_path_replacement_notice` field flagging which fields need editing.
+The shipped configs use generic `/path/to/...` placeholders. Replace them with paths to your own model installation and dataset before running.
 
 ### Run
 

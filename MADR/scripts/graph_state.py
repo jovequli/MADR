@@ -89,6 +89,13 @@ class CalibrationState(TypedDict, total=False):
     radii: Dict[str, Dict[str, float]]
     direction_history: Dict[str, Dict]     # anti-flip momentum
 
+    # ── SWAT joint best bundle (model_combination == "swat" only) ──
+    # Cross-round watershed-level historical best from ONE joint simulation:
+    # {round_id, strategy_index, params_by_sid, metrics_by_sid, mean_nse,
+    #  j_total}. None until the first completed round is accepted; resumed
+    # old checkpoints lack the key entirely (read via state.get()).
+    swat_best_bundle: Optional[Dict[str, Any]]
+
     # ── Batch processing ──
     current_level_idx: int
     current_batch_sids: List[str]
