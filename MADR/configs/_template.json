@@ -5,8 +5,7 @@
   "model_combination": "vic_routing",
   "_doc_model_combination": "Selects executor + prompts/. One of: vic_routing | vic_cama_flood | swat. Defaults to vic_routing for backward compatibility.",
   "max_rounds": 0,
-  "_doc_max_rounds": "0 = derive from sum of per-phase max_rounds. >0 = override global cap.",
-  "candidates_per_worker": 1,
+  "_doc_max_rounds": "Optimization-round cap, excluding the mandatory final force-best verification. 0 = derive from the sum of per-phase max_rounds; >0 overrides that sum. The runtime always reserves one additional final round.",
   "max_parallel_workers": 3,
   "simulation_period": {
     "start_year": 1980,
@@ -32,7 +31,7 @@
   "mc_selection_metric": "mean_nse",
   "_doc_mc_selection_metric": "mean_nse or j_total. SWAT+ should normally use j_total so every accepted strategy and cross-round center is one watershed-level joint bundle.",
   "phase_config": {
-    "_doc": "Per-phase hard caps and patience. VIC-based combinations track in-phase mean NSE; SWAT+ tracks acceptance of the configured watershed-level joint objective. Multi-candidate rounds do not increment patience. Set patience_rounds to 999 to force the full phase budget.",
+    "_doc": "Per-phase optimization-round caps and patience. VIC-based combinations track in-phase mean NSE; SWAT+ tracks acceptance of the configured watershed-level joint objective. Multi-candidate rounds do not increment patience. Round 1 is the default-parameter baseline even when it lies in the first mc_rounds window. Set patience_rounds to 999 to force the full phase budget; one final force-best verification is then added outside the pipeline.",
     "pipeline": [
       {
         "name": "VIC_ONLY",

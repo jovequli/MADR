@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI entry point for LangGraph-based TRAv2 calibration.
+"""CLI entry point for LangGraph-based MADR calibration.
 
 Replaces orchestrator.main() with LangGraph graph execution.
 Supports:
@@ -7,22 +7,22 @@ Supports:
 - --output-root: override output directory
 - --resume: resume from last checkpoint
 - --dry-run: skip LLM calls, use rule-based fallback
-- --max-rounds: override max rounds
+- --max-rounds: override optimization rounds (final verification is additional)
 - --log-level: logging level
 
 Usage:
     python -m scripts.run_langgraph \
-        --team-config configs/bengbu_1979_1980.json \
+        --team-config configs/vic_routing_bengbu.json \
         --output-root /path/to/outputs
 
     # Resume from checkpoint:
     python -m scripts.run_langgraph \
-        --team-config configs/bengbu_1979_1980.json \
-        --resume
+        --team-config configs/vic_routing_bengbu.json \
+        --output-root output/vic_routing_bengbu --resume
 
     # Dry run (no LLM calls):
     python -m scripts.run_langgraph \
-        --team-config configs/bengbu_1979_1980.json \
+        --team-config configs/vic_routing_bengbu.json \
         --dry-run --max-rounds 3
 """
 
@@ -57,7 +57,7 @@ def load_team_config(path: str) -> dict:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="LangGraph-based TRAv2 calibration orchestrator."
+        description="LangGraph-based MADR calibration orchestrator."
     )
     p.add_argument(
         "--team-config", required=True,
@@ -86,7 +86,8 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--max-rounds", type=int, default=0,
-        help="Override max rounds (0 = use config/pipeline sum).",
+        help="Override optimization rounds, excluding the additional final "
+             "force-best verification (0 = use config or pipeline sum).",
     )
     p.add_argument(
         "--log-level", default="INFO",

@@ -3,7 +3,6 @@
   "_path_replacement_notice": "All /path/to/... values are placeholders. Replace them with paths from your own model installation and dataset before running.",
   "run_name": "songhua_nested_real",
   "max_rounds": 0,
-  "candidates_per_worker": 1,
   "max_parallel_workers": 2,
   "simulation_period": {
     "start_year": 2000,
@@ -32,10 +31,24 @@
     "pipeline": [
       {
         "name": "VIC_ONLY",
-        "max_rounds": 1,
+        "max_rounds": 50,
+        "mc_rounds": 11,
+        "mc_candidates": 3,
+        "patience_rounds": 10
+      },
+      {
+        "name": "CAMA_FLOOD_ONLY",
+        "max_rounds": 30,
+        "mc_rounds": 5,
+        "mc_candidates": 3,
+        "patience_rounds": 5
+      },
+      {
+        "name": "JOINT",
+        "max_rounds": 10,
         "mc_rounds": 0,
         "mc_candidates": 0,
-        "patience_rounds": 999
+        "patience_rounds": 3
       }
     ]
   },

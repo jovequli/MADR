@@ -7,7 +7,7 @@ In the paper, MADR approaches the calibration accuracy of two benchmark optimiza
 📦 **Preprint**: Zhao, Li, Zhu, Jin, Zhang (2026). *LLM-Driven Diagnostic Reasoning for Distributed Hydrological Model Calibration*. Research Square. [10.21203/rs.3.rs-10106384/v1](https://doi.org/10.21203/rs.3.rs-10106384/v1)
 📂 **Dataset**: observations, model inputs, all calibration runs, and benchmark outputs on Zenodo. [10.5281/zenodo.20622937](https://doi.org/10.5281/zenodo.20622937)
 
-> **Version note.** The initial public code release associated with the Version 1 preprint is preserved under tag [`v0.1.0`](https://github.com/jovequli/MADR/tree/v0.1.0). The default branch contains subsequent correctness and robustness updates.
+> **Version note.** The initial public code release associated with the Version 1 preprint is preserved under tag [`v0.1.0`](https://github.com/jovequli/MADR/tree/v0.1.0). Release [`v0.2.0`](https://github.com/jovequli/MADR/tree/v0.2.0) introduced the first correctness and robustness update. Release [`v0.2.1`](https://github.com/jovequli/MADR/tree/v0.2.1) synchronizes the public run instructions, formal example pipelines, dependency installation, and round-budget semantics.
 
 ## Repository contents
 
@@ -55,17 +55,17 @@ Three coordination mechanisms keep the Workers consistent: **topological process
 
 ## Calibration strategy
 
-MADR runs an **Exploration Stage** followed by one or more **sequential Agent Phases**. The number and content of phases are defined by the model combination — each combination ships its own phase pipeline, chosen so that successive phases isolate a tractable parameter subspace. Every phase ends as soon as either of two conditions fires:
+MADR can run an optional **Exploration Stage** followed by one or more **sequential Agent Phases**. The number and content of phases are defined by the model combination — each combination ships its own phase pipeline, chosen so that successive phases isolate a tractable parameter subspace. Every phase ends as soon as either of two conditions fires:
 
 1. **Patience-based early termination** (recommended) — VIC-based combinations track the in-phase mean sub-basin NSE. SWAT+ tracks acceptance of the configured watershed-level joint objective. Multi-candidate rounds are excluded from the counter so aggressive exploration does not trip the trigger.
 2. **`max_rounds` cap** — a hard upper bound that always applies, providing a safety ceiling on per-phase cost.
 
-This adaptive behavior is the headline of the current build: each phase stops as soon as it plateaus, rather than always running to its full round budget.
+When finite patience is configured, a phase stops as soon as it plateaus rather than always running to its full round budget. Set `patience_rounds` to `999` when a fixed budget is required.
 
-- **Exploration Stage** (before any Agent Rounds): a configurable number of simulations per sub-basin, drawn as a mix of Gaussian perturbations around the configured default and Latin Hypercube samples across the feasible range. The per-sub-basin summary (best NSE, top NSE values, best parameter combination) is injected into every Worker's prompt as fixed contextual reference and shown to the Leader once at Round 1. The exploration is **soft contextual evidence** to the LLMs; it does not modify the initial parameter center or the search radius.
+- **Exploration Stage** (optional, before any Agent Rounds): for the VIC-based combinations, a configurable number of simulations per sub-basin is drawn as a mix of Gaussian perturbations around the configured default and Latin Hypercube samples across the feasible range. The shipped Huai River config uses 10 near-center + 40 LHS samples. The per-sub-basin summary (best NSE, top NSE values, best parameter combination) is injected into every Worker's prompt as fixed contextual reference and shown to the Leader once at Round 1. Exploration is **soft contextual evidence**; it does not modify the initial parameter center or search radius. The SWAT+ example leaves this VIC-soil explorer disabled.
 - **Multi-candidate generation** (early rounds of selected phases): every Worker is invoked with strategy tags such as `conservative` / `moderate` / `bold`. VIC-based combinations select locally by NSE. SWAT+ evaluates each strategy in one watershed-wide run and adopts one common strategy index using `mean_nse` or `j_total` as configured.
 - **Round 1 special case**: the Worker LLM is not invoked. The model runs with the configured default parameters, providing the baseline against which the Leader's first guidance is issued.
-- **Final round (force-best)**: after the last phase ends, VIC-based combinations restore per-basin historical best parameters. SWAT+ restores one accepted watershed-level joint bundle, so parameters from different unverified joint runs are never mixed.
+- **Final round (force-best)**: after the optimization pipeline ends, one additional verification round restores the per-basin historical best parameters for VIC-based combinations. SWAT+ restores one accepted watershed-level joint bundle, so parameters from different unverified joint runs are never mixed. This final run is outside the configured optimization-round budget.
 
 Both J_total and NSE are retained throughout optimization. J_total combines basin-average NSE with peak- and low-flow consistency, while station-wise and basin-average NSE remain the primary reported performance metrics.
 
@@ -75,7 +75,9 @@ A phase entry in the pipeline looks like this (generic shape — see the Case St
 {"name": "PHASE_NAME", "max_rounds": M, "mc_rounds": K, "mc_candidates": 3, "patience_rounds": P}
 ```
 
-`mc_rounds` says how many of the first K rounds of that phase use the multi-candidate mechanism; `patience_rounds` is optional (omit, or set to `999`, to disable early termination and force the full `max_rounds`).
+`mc_rounds=K` opens a multi-candidate window over the first K rounds of that phase. The global Round 1 baseline is always single-candidate because no Leader guidance exists yet; therefore `mc_rounds=11` in the first phase means Round 1 uses defaults and Rounds 2–11 are multi-candidate. In later phases, all of the first K rounds use multiple candidates. `patience_rounds` is optional (omit, or set to `999`, to disable early termination and force the full phase budget).
+
+The top-level `max_rounds` is an optional cap on **optimization rounds**, excluding the additional final verification. A value of `0` derives the cap from the sum of the phase-level `max_rounds`; a positive value overrides that sum. The CLI `--max-rounds` option has the highest precedence and uses the same optimization-only semantics.
 
 ---
 
@@ -132,8 +134,10 @@ The paper validates MADR on the catchment upstream of the Bengbu gauging station
 
 - **Calibration period**: 1981–1990 (1980 spin-up)
 - **Validation period**: 1991–1996 (independent transferability test)
-- **Per-basin budget**: 170 model evaluations (50 Exploration + 120 Agent Rounds)
+- **Paper evaluation budget**: 170 model evaluations per basin
 - **LLMs tested**: Claude Sonnet 4.6, Gemini 3 Flash Preview
+
+The shipped configuration runs the calibration period only. The paper's 1991–1996 validation was a separate fixed-parameter evaluation using the calibrated parameter set; it is not launched automatically by the Quick Start command.
 
 **Recommended phase pipeline** for this case (patience enabled):
 
@@ -147,7 +151,7 @@ The paper validates MADR on the catchment upstream of the Bengbu gauging station
 }
 ```
 
-With patience enabled, this typically converges in ~110–150 evaluations per sub-basin. **To reproduce the paper's fixed-budget runs exactly**, omit `patience_rounds` (or set it to `999`); each phase then runs to its full `max_rounds`, giving exactly 170 evaluations per sub-basin (50 Exploration + 75 single-candidate × 1 + 15 multi-candidate × 3).
+The phase pipeline contains 90 optimization rounds. Round 1 is the default baseline; Rounds 2–11 of `VIC_ONLY` and the first five rounds of `ROUTING_ONLY` use three candidates, giving 75 single-candidate optimization rounds and 15 three-candidate rounds. With 50 Exploration simulations and the current build's additional final verification, the maximum is 171 model executions per basin. Patience normally reduces this total. The 170-evaluation results reported below are the fixed-budget experiments archived with the Version 1 preprint; the maintained code makes the final verification explicitly additional rather than silently consuming the last optimization slot.
 
 ### Results
 
@@ -182,22 +186,22 @@ The full dataset (observations + VIC/Lohmann inputs + 10 × MADR runs × 2 LLMs 
 ### Install Python dependencies
 
 ```bash
-pip install langgraph anthropic
-# Add the SDKs for any other LLM providers you intend to use:
-# pip install google-genai           # Gemini
-# pip install openai httpx           # OpenAI / DeepSeek / Kimi
+pip install -r requirements.txt
 ```
+
+The requirements file includes the LangGraph SQLite checkpointer, NumPy, the tested LLM SDKs, and the pandas/netCDF4 dependencies used by the CaMa-Flood adapter.
 
 ### Set your LLM API key
 
 ```bash
 export ANTHROPIC_API_KEY="your-key"    # default in the shipped configs
-# or any of: GEMINI_API_KEY, OPENAI_API_KEY, DEEPSEEK_API_KEY, KIMI_API_KEY, ...
+# or: GEMINI_API_KEY, OPENAI_API_KEY, DEEPSEEK_API_KEY, KIMI_API_KEY,
+#     DASHSCOPE_API_KEY, or MINIMAX_API_KEY
 ```
 
 ### Configure model and data paths
 
-The shipped configs use generic `/path/to/...` placeholders. Replace them with paths to your own model installation and dataset before running.
+The shipped configs use generic `/path/to/...` placeholders. Replace them with paths to your own model installation and dataset before running. For SWAT+, set `MADR_SWATPLUS_CAL_PARMS` if `cal_parms.cal` must be copied into working `TxtInOut` directories that do not already contain it.
 
 ### Run
 
@@ -207,20 +211,25 @@ cd MADR
 # VIC + Lohmann (paper default)
 python -m scripts.run_langgraph \
     --team-config configs/vic_routing_bengbu.json \
-    --output-root ./output
+    --output-root ./output/vic_routing_bengbu
 
 # VIC + CaMa-Flood
 python -m scripts.run_langgraph \
     --team-config configs/vic_cama_flood_songhua.json \
-    --output-root ./output
+    --output-root ./output/vic_cama_flood_songhua
 
 # SWAT+
 python -m scripts.run_langgraph \
     --team-config configs/swat_yellow.json \
-    --output-root ./output
+    --output-root ./output/swat_yellow
 ```
 
 CLI options: `--team-config PATH`, `--output-root PATH`, `--result-repo PATH`, `--run-name NAME`, `--resume`, `--dry-run`, `--max-rounds N`, `--log-level LEVEL`, `--thread-id ID`.
+
+- `--dry-run` replaces Leader and Worker API calls with deterministic fallbacks; it does **not** skip the hydrological executable. To test orchestration without running VIC, CaMa-Flood, or SWAT+, use a copied config with `model_binding.mode` set to `simulate`.
+- `--resume` must use the same `--output-root` and `--thread-id` as the interrupted run because the SQLite checkpoint is stored inside that output directory.
+- Use a different output directory for each independent run. `--result-repo PATH --run-name NAME` can create a timestamped run folder automatically; resume that run later by passing its exact folder through `--output-root`.
+- `--max-rounds N` caps optimization at N rounds and still reserves one additional force-best verification round.
 
 ---
 
@@ -230,10 +239,10 @@ The `MADR/configs/` folder ships four examples:
 
 | File | Combination | Purpose |
 |---|---|---|
-| `_template.json` | (any) | Annotated master template — every field documented inline via `_doc_*` keys |
+| `_template.json` | (any) | Annotated template for the common workflow fields, documented inline via `_doc_*` keys |
 | `vic_routing_bengbu.json` | `vic_routing` | Paper's Huai River 5-basin setup (Bengbu outlet) |
-| `vic_cama_flood_songhua.json` | `vic_cama_flood` | Songhua River nested pair (Jiangqiao → Jiamusi), real-mode CaMa-Flood pipeline |
-| `swat_yellow.json` | `swat` | Yellow River Tangnaihai → Lanzhou, single-phase SWATPLUS_HRU calibration |
+| `vic_cama_flood_songhua.json` | `vic_cama_flood` | Songhua River nested pair (Jiangqiao → Jiamusi), full real-mode `VIC_ONLY → CAMA_FLOOD_ONLY → JOINT` pipeline |
+| `swat_yellow.json` | `swat` | Yellow River Tangnaihai → Lanzhou, real-mode 90-round `SWATPLUS_HRU` pipeline with watershed-level J_total selection |
 
 ---
 

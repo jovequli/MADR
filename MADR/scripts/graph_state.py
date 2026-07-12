@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LangGraph state schema for TRAv2 calibration.
+"""LangGraph state schema for MADR calibration.
 
 Defines the CalibrationState TypedDict used as the graph's state,
 plus the merge_worker_results reducer for Send() fan-out.
@@ -40,6 +40,7 @@ class PhaseSpec(TypedDict, total=False):
     max_rounds: int       # max rounds for this phase
     mc_rounds: int        # how many rounds use multi-candidate mode
     mc_candidates: int    # number of candidates per multi-candidate round
+    patience_rounds: int  # plateau limit; 999 disables early transition
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +68,8 @@ class CalibrationState(TypedDict, total=False):
     upstream_map: Dict[str, List[str]]     # {basin: [upstream_basins]}
     full_upstream_map: Dict[str, List[str]]
     fixed_upstream_routing: Dict[str, Dict]
-    max_rounds: int
+    optimization_max_rounds: int             # search-round cap, excluding final verification
+    max_rounds: int                          # total cap, including one extra force-best round
     max_parallel_workers: int
 
     # ── Phase pipeline ──

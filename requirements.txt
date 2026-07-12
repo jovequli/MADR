@@ -1,0 +1,9 @@
+langgraph
+langgraph-checkpoint-sqlite
+numpy
+anthropic
+openai
+google-genai
+httpx
+pandas
+netCDF4

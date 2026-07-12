@@ -5,7 +5,6 @@
   "output_root": "./output/swat_yellow",
   "swatplus_scratch_dir": "./.madr_scratch/swat_yellow",
   "max_rounds": 90,
-  "candidates_per_worker": 1,
   "max_parallel_workers": 2,
   "simulation_period": {
     "start_year": 1979,
@@ -21,13 +20,8 @@
     "enabled": false,
     "seed_from_run": ""
   },
-  "multi_candidate": {
-    "n_candidates": 2,
-    "vic_rounds": 0,
-    "rout_rounds": 0
-  },
   "model_binding": {
-    "mode": "simulate"
+    "mode": "real"
   },
   "outlet_subbasin_id": "lanzhou",
   "swatplus_exe": "/path/to/swatplus",
@@ -47,15 +41,12 @@
     "pipeline": [
       {
         "name": "SWATPLUS_HRU",
-        "max_rounds": 2,
-        "mc_rounds": 1,
-        "mc_candidates": 2,
-        "patience_rounds": 999
+        "max_rounds": 90,
+        "mc_rounds": 11,
+        "mc_candidates": 3,
+        "patience_rounds": 30
       }
-    ],
-    "phase_nse_thresholds": {
-      "SWATPLUS_HRU": 0.5
-    }
+    ]
   },
   "param_ranges": {
     "cn2": [

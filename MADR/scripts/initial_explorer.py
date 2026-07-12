@@ -101,7 +101,7 @@ def _generate_random_samples(
 def run_initial_exploration(
     orchestrator,
     n_near: int = 10,
-    n_random: int = 20,
+    n_random: int = 40,
     vic_only_keys: Optional[List[str]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Run initial exploration for all basins.
@@ -182,7 +182,7 @@ def run_initial_exploration(
                     "metrics": metrics if ok else {},
                     "nse": nse,
                     "ok": ok,
-                    "label": "default" if i == 0 else ("near" if i <= n_near else "random"),
+                    "label": "near" if i < n_near else "random",
                 })
 
             # Sort by NSE descending

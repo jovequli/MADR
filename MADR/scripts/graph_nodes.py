@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LangGraph node functions for TRAv2 calibration.
+"""LangGraph node functions for MADR calibration.
 
 Each function takes CalibrationState and returns a partial state update dict.
 All domain logic is delegated to existing modules; these nodes are pure
@@ -849,9 +849,18 @@ def init_calibration(state: CalibrationState) -> Dict[str, Any]:
     centers = {w["subbasin_id"]: dict(initial_center) for w in worker_cfgs}
     radii = {w["subbasin_id"]: dict(initial_radius) for w in worker_cfgs}
 
-    # Phase pipeline
+    # Phase pipeline.  The configured/CLI cap counts optimization rounds.
+    # One additional slot is always reserved for the mandatory force-best
+    # verification run, so a full pipeline never loses its last search round.
     phase_pipeline = load_phase_pipeline(cfg)
-    max_rounds = state.get("max_rounds", 0) or get_total_max_rounds(phase_pipeline)
+    cli_max_rounds = int(state.get("max_rounds", 0) or 0)
+    config_max_rounds = int(cfg.get("max_rounds", 0) or 0)
+    optimization_max_rounds = (
+        cli_max_rounds
+        or config_max_rounds
+        or get_total_max_rounds(phase_pipeline)
+    )
+    max_rounds = optimization_max_rounds + 1
 
     # Objective weights and stop rules
     objective_weights = cfg.get("objective_weights", {"mean_nse": 0.90, "consistency": 0.10})
@@ -881,7 +890,9 @@ def init_calibration(state: CalibrationState) -> Dict[str, Any]:
         "team_config": state.get("team_config_path", ""),
         "output_root": str(output_root),
         "mode": state.get("mode", "simulate"),
+        "optimization_max_rounds": optimization_max_rounds,
         "max_rounds": max_rounds,
+        "final_round_is_additional": True,
         "objective_weights": objective_weights,
         "stop_rules": stop_rules,
         "initial_phase": phase_pipeline[0]["name"] if phase_pipeline else "VIC_ONLY",
@@ -896,7 +907,8 @@ def init_calibration(state: CalibrationState) -> Dict[str, Any]:
     _SHARED.clear()
 
     print(f"  Calibration initialized: {len(worker_cfgs)} basins, "
-          f"{len(phase_pipeline)} phases, {max_rounds} total rounds")
+          f"{len(phase_pipeline)} phases, {optimization_max_rounds} optimization "
+          f"rounds + 1 final verification round")
 
     return {
         "worker_cfgs": worker_cfgs,
@@ -911,6 +923,7 @@ def init_calibration(state: CalibrationState) -> Dict[str, Any]:
         "stop_rules": stop_rules,
         "phase_pipeline": phase_pipeline,
         "phase_nse_thresholds": phase_nse_thresholds,
+        "optimization_max_rounds": optimization_max_rounds,
         "max_rounds": max_rounds,
         "max_parallel_workers": int(cfg.get("max_parallel_workers", 4)),
         "centers": centers,
@@ -1084,7 +1097,7 @@ def run_exploration(state: CalibrationState) -> Dict[str, Any]:
     results = run_initial_exploration(
         orchestrator=adapter,
         n_near=int(explore_cfg.get("n_near", 10)),
-        n_random=int(explore_cfg.get("n_random", 20)),
+        n_random=int(explore_cfg.get("n_random", 40)),
     )
     summary = format_exploration_summary(results)
 
@@ -1096,7 +1109,7 @@ def run_exploration(state: CalibrationState) -> Dict[str, Any]:
     }
     _write_json(output_root / "initial_exploration.json", explore_out)
 
-    # Save full per-basin exploration results (all 31 samples)
+    # Save full per-basin exploration results.
     explore_dir = output_root / "exploration"
     _ensure_dir(explore_dir)
     for sid, r in results.items():
@@ -1126,10 +1139,10 @@ def round_start(state: CalibrationState) -> Dict[str, Any]:
     A round is the FINAL force-best round if either:
       - `force_final_round` flag was set by check_phase_transition_node
         (last phase ended via patience or max_rounds), OR
-      - the global max_rounds safety cap is reached.
+      - the extra final slot after the optimization-round cap is reached.
     """
     round_id = state.get("round_id", 0) + 1
-    max_rounds = state["max_rounds"]
+    max_rounds = state["max_rounds"]  # includes one extra final slot
     force_final = state.get("force_final_round", False)
     is_final = force_final or (round_id >= max_rounds)
     phase_name = state["current_phase_name"]
@@ -1454,7 +1467,7 @@ def _run_worker_multi(
     worker, vic_executor, round_id, center, radius, guidance,
     round_dir, n_candidates, phase, up_routing, up_soil, up_cama=None,
 ) -> Tuple[Dict, str]:
-    """Run multi-candidate worker round (TRAv2: LLM-based).
+    """Run an LLM-based multi-candidate Worker round.
 
     1. Call Worker LLM n_candidates times (conservative / moderate / bold).
     2. Each call produces a full parameter set directly.
@@ -3252,6 +3265,8 @@ def finalize(state: CalibrationState) -> Dict[str, Any]:
         "output_root": str(output_root),
         "mode": state.get("mode", "simulate"),
         "rounds_executed": state.get("round_id", 0),
+        "optimization_max_rounds": state.get("optimization_max_rounds", 0),
+        "final_round_is_additional": True,
         "final_phase": state.get("current_phase_name", ""),
         "phase_history": state.get("phase_history", []),
         "best_round": best.get("round_id", -1),

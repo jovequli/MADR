@@ -35,10 +35,26 @@ The graph performs the following sequence:
    signatures are meaningful at the observation timestep.
 6. Ask the Leader for structured cross-basin guidance.
 7. Update centers and patience state.
-8. Run one mandatory force-best final evaluation.
+8. Run one mandatory force-best final evaluation outside the optimization
+   budget.
 
 Missing or non-finite station NSE values invalidate the global round instead of
 silently dropping failed stations from the mean.
+
+## Round budgets
+
+Each phase-level `max_rounds` counts optimization rounds. The optional
+top-level `max_rounds` overrides the sum of those phase caps; the CLI
+`--max-rounds` override has the highest precedence. Regardless of which source
+sets the optimization cap, the runtime reserves one additional force-best
+verification round. Patience may end the pipeline earlier, but the final
+verification still runs once.
+
+The first global round is always the single-candidate default-parameter
+baseline. Consequently, an `mc_rounds` window in the first phase includes
+Round 1 numerically but activates multi-candidate generation only from Round 2.
+Later phases use multi-candidate generation throughout their configured
+windows.
 
 ## VIC-based topological execution
 

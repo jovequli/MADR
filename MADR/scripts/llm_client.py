@@ -7,7 +7,7 @@ Supports multiple backends through OpenAI-compatible API format:
 - Google Gemini (via google-genai SDK)
 - Kimi (Moonshot) — OpenAI-compatible
 - Qwen (DashScope) — OpenAI-compatible
-- MiniMax — OpenAI-compatible
+- MiniMax — Anthropic-compatible
 
 All backends expose the same interface: chat() -> structured JSON.
 """
@@ -235,7 +235,7 @@ class LLMClient:
                 elif self.provider == "gemini":
                     resp = self._call_gemini(messages, system, temp, tokens)
                 else:
-                    # OpenAI-compatible (openai, kimi, qwen)
+                    # OpenAI-compatible (OpenAI, DeepSeek, Kimi, Qwen)
                     resp = self._call_openai_compat(messages, system, temp, tokens)
                 resp.duration_sec = round(time.monotonic() - t0, 3)
 

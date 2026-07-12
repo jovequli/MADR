@@ -1,4 +1,4 @@
-"""Pluggable model-execution layer for MADR.cli.
+"""Pluggable model-execution layer for MADR.
 
 A `ModelExecutor` runs one model combination's full per-candidate evaluation
 pipeline: take parameters in, run the model(s), return metrics. Concrete
@@ -6,6 +6,7 @@ combinations live in sibling modules:
 
     vic_routing       -> VICRoutingExecutor      (VIC + Lohmann routing)
     vic_cama_flood    -> VICCamaFloodExecutor    (VIC + CaMa-Flood)
+    swat              -> SWATExecutor            (SWAT+ integrated routing)
 
 Call `make_executor(combination, ...)` to get the right one for the run.
 """

@@ -1,6 +1,6 @@
 """Prompts directory resolver.
 
-The MADR.cli prompt tree is sharded by model combination:
+The MADR prompt tree is sharded by model combination:
 
     prompts/
         vic_routing/...
