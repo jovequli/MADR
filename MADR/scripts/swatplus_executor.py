@@ -21,39 +21,60 @@ from .routing_utils import UpstreamRoutingInfo
 
 logger = logging.getLogger(__name__)
 
-# SWAT+ calibration parameters (v2: names verified against cal_parms.cal).
-# Removed: gw_delay (source-code disabled), alpha_bf (wrong name; use 'alpha').
-# Added: revap_min, deep_seep, and 5 snow params (TNH-relevant).
+# SWAT+ calibration parameters (v3: 19-param literature-aligned set for the
+# middle/upper Yangtze). Names verified against cal_parms.cal. Removed the 5
+# snow params (snofall_tmp / snomelt_*) — not sensitive in these rainfall-driven
+# basins and absent from the regional SWAT+ sensitivity literature. Added 6
+# literature-sensitive params: petco, cn3_swf, ovn (hru), k (soil Ksat, sol),
+# bf_max (aqu), chn (channel Manning n, rte).
 PARAM_KEYS = [
-    "cn2", "esco", "awc", "surlag", "lat_ttime", "canmx",
-    "epco", "perco", "alpha", "revap_co", "revap_min", "flo_min", "deep_seep",
+    # HRU
+    "cn2", "esco", "epco", "perco", "petco", "cn3_swf", "ovn", "lat_ttime", "canmx",
+    # SOL (soil)
+    "awc", "k",
+    # AQU (aquifer)
+    "alpha", "revap_co", "revap_min", "flo_min", "deep_seep", "bf_max",
+    # BSN (basin)
+    "surlag",
+    # RTE (channel routing)
+    "chn",
+    # SNOW (hru; re-added from v2/reference for cold-basin SWAT+, per the combine request)
     "snofall_tmp", "snomelt_tmp", "snomelt_max", "snomelt_min", "snomelt_lag",
 ]
 
-# SWAT+ change-types per the guide section 2.2
-# All names below have been verified against the model's cal_parms.cal.
-# Removed: gw_delay (source-code disabled), alpha_bf (wrong name; use 'alpha').
-# Added: revap_min, deep_seep, and 5 snow parameters (TNH only at the prompt
-# level but globally tunable here so the runner accepts them).
+# SWAT+ change-types. absval = literature "Replace" (set exactly); pctchg =
+# literature "Percent" (multiply native value by 1+val/100 — preserves the
+# per-HRU spatial heterogeneity from soil/land-use layers). Types follow the
+# regional SWAT+ sensitivity-analysis convention. All names verified against
+# the model's cal_parms.cal.
 CHANGE_TYPES: Dict[str, str] = {
+    # HRU
     "cn2":          "pctchg",   # preserve spatial pattern from soil/landuse
     "esco":         "absval",
-    "awc":          "pctchg",
-    "surlag":       "absval",
-    "lat_ttime":    "absval",
-    "canmx":        "absval",
     "epco":         "absval",
     "perco":        "absval",
+    "petco":        "absval",   # PET adjustment factor
+    "cn3_swf":      "absval",   # soil-water factor for CN3
+    "ovn":          "pctchg",   # overland-flow Manning n (preserve pattern)
+    "lat_ttime":    "absval",
+    "canmx":        "absval",
+    # SOL (soil)
+    "awc":          "pctchg",
+    "k":            "pctchg",   # soil saturated hydraulic conductivity
+    # AQU (aquifer)
     "alpha":        "absval",   # NOTE: was alpha_bf in v1; cal_parms.cal has 'alpha'.
     "revap_co":     "absval",
     "revap_min":    "absval",   # water-table depth threshold for revap (m)
     "flo_min":      "absval",   # water-table depth threshold for baseflow (m)
     "deep_seep":    "absval",   # deep percolation fraction (m/m)
-    "snofall_tmp":  "absval",   # snow params (TNH only at prompt level)
-    "snomelt_tmp":  "absval",
-    "snomelt_max":  "absval",
-    "snomelt_min":  "absval",
-    "snomelt_lag":  "absval",
+    "bf_max":       "pctchg",   # max baseflow rate
+    # BSN (basin)
+    "surlag":       "absval",
+    # RTE (channel routing)
+    "chn":          "pctchg",   # channel Manning n (preserve pattern)
+    # SNOW (absval; re-added from v2/reference for cold-basin SWAT+)
+    "snofall_tmp":  "absval", "snomelt_tmp": "absval", "snomelt_max": "absval",
+    "snomelt_min":  "absval", "snomelt_lag": "absval",
 }
 
 
@@ -358,6 +379,7 @@ class SWATPlusExecutor:
                     obs_file=cfg.obs_file,
                     start_date=cfg.start_date,
                     end_date=cfg.end_date,
+                    channel_id=int(getattr(cfg, "channel_id", 0) or 0),
                 ))
 
         tag = phase_tag or f"batched_r{run_id}"

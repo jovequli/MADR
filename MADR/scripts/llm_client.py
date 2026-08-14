@@ -7,21 +7,61 @@ Supports multiple backends through OpenAI-compatible API format:
 - Google Gemini (via google-genai SDK)
 - Kimi (Moonshot) — OpenAI-compatible
 - Qwen (DashScope) — OpenAI-compatible
-- MiniMax — Anthropic-compatible
+- MiniMax — OpenAI-compatible
 
 All backends expose the same interface: chat() -> structured JSON.
 """
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import logging
 import os
+import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Verbatim LLM call logging (write-before-parse)
+# ---------------------------------------------------------------------------
+# Every request/response that passes through LLMClient.chat() is appended as
+# one JSON line to the file named by the MADR_LLM_LOG environment variable
+# (set by run_langgraph at startup to <output_root>/llm_calls.jsonl).
+#
+# Design rules:
+#   * The raw response text is persisted BEFORE any JSON parsing is attempted,
+#     so parse failures can never lose evidence.
+#   * Logging is strictly additive and never raises: any logging failure is
+#     swallowed (with a logger warning) so it cannot affect the run.
+#   * Append-only JSONL: crash-safe (at worst one truncated final line),
+#     greppable, and no SQLite/WAL hazards.
+
+_LLM_LOG_ENV = "MADR_LLM_LOG"
+_llm_log_lock = threading.Lock()
+
+
+def _append_llm_log(record: Dict[str, Any]) -> None:
+    """Append one record to the verbatim call log. Never raises."""
+    path = os.environ.get(_LLM_LOG_ENV, "").strip()
+    if not path:
+        return
+    try:
+        line = json.dumps(record, ensure_ascii=False, default=str)
+        with _llm_log_lock:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+                f.flush()
+    except Exception:
+        logger.warning("Failed to append LLM call log (non-fatal)", exc_info=True)
+
+
+def _utc_now_iso() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).isoformat()
 
 # ---------------------------------------------------------------------------
 # Provider registry
@@ -31,6 +71,20 @@ PROVIDER_DEFAULTS: Dict[str, Dict[str, str]] = {
     "anthropic": {
         "api_key_env": "ANTHROPIC_API_KEY",
         "base_url": "",  # uses native SDK
+    },
+    "claude_cli": {
+        # Invokes the local `claude` CLI binary instead of HTTP API.
+        # Auth handled by Claude Code's own credential store (no API key needed).
+        "api_key_env": "",
+        "base_url": "",
+        "binary": "claude",  # override via config.base_url if non-standard path
+    },
+    "codex_cli": {
+        # Invokes the local `codex exec` CLI instead of the OpenAI HTTP API.
+        # Auth handled by Codex's own credential store (no API key needed).
+        "api_key_env": "",
+        "base_url": "",
+        "binary": "codex",  # override via config.base_url if non-standard path
     },
     "openai": {
         "api_key_env": "OPENAI_API_KEY",
@@ -73,10 +127,6 @@ MODEL_PROVIDER_MAP: Dict[str, str] = {
     "gpt-5.2-codex": "openai",
     "gpt-5.1-codex-max": "openai",
     "gpt-5.1-codex-mini": "openai",
-    "gpt-5.4": "openai",
-    "gpt-5.4-mini": "openai",
-    "gpt-5.4-nano": "openai",
-    "gpt-5.5": "openai",
     # Gemini
     "gemini-3-pro-preview": "gemini",
     "gemini-3-flash-preview": "gemini",
@@ -85,7 +135,6 @@ MODEL_PROVIDER_MAP: Dict[str, str] = {
     "gemini-2.5-flash-lite": "gemini",
     # Kimi
     "kimi-k2.5": "kimi",
-    "kimi-k2.6": "kimi",
     "moonshot-v1-auto": "kimi",
     "kimi-latest": "kimi",
     # Qwen
@@ -175,19 +224,20 @@ class LLMClient:
             config.provider = infer_provider(config.model)
         self.provider = config.provider
 
-        # Resolve API key (all providers in this API-only build need one).
+        # Resolve API key (CLI providers skip this — they use their own auth)
         self._api_key = config.api_key
-        if not self._api_key:
-            env_var = config.api_key_env or PROVIDER_DEFAULTS.get(
-                self.provider, {}
-            ).get("api_key_env", "")
-            if env_var:
-                self._api_key = os.environ.get(env_var, "")
-        if not self._api_key:
-            raise ValueError(
-                f"No API key for provider '{self.provider}'. "
-                f"Set env var or pass api_key directly."
-            )
+        if self.provider not in {"claude_cli", "codex_cli"}:
+            if not self._api_key:
+                env_var = config.api_key_env or PROVIDER_DEFAULTS.get(
+                    self.provider, {}
+                ).get("api_key_env", "")
+                if env_var:
+                    self._api_key = os.environ.get(env_var, "")
+            if not self._api_key:
+                raise ValueError(
+                    f"No API key for provider '{self.provider}'. "
+                    f"Set env var or pass api_key directly."
+                )
 
         # Resolve base URL
         self._base_url = config.base_url or PROVIDER_DEFAULTS.get(
@@ -208,6 +258,7 @@ class LLMClient:
         json_schema: Optional[Dict] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        meta: Optional[Dict[str, Any]] = None,
     ) -> LLMResponse:
         """Send a chat request and return structured response.
 
@@ -217,6 +268,10 @@ class LLMClient:
             json_schema: Optional JSON schema for structured output validation
             temperature: Override default temperature
             max_tokens: Override default max_tokens
+            meta: Optional caller identity for the verbatim call log, e.g.
+                {"role": "worker", "subbasin": "bengbu", "round": 5,
+                 "phase": "VIC_ONLY"}. Purely observational — has no effect
+                on the request itself.
 
         Returns:
             LLMResponse with content, parsed JSON, and usage stats
@@ -224,20 +279,56 @@ class LLMClient:
         temp = temperature if temperature is not None else self.config.temperature
         tokens = max_tokens if max_tokens is not None else self.config.max_tokens
 
+        # --- verbatim call log context (write-before-parse) ---
+        call_id = uuid.uuid4().hex[:12]
+        _request_snapshot = {"system": system, "messages": messages}
+
+        def _log_response(resp_obj: "LLMResponse", event: str,
+                          attempt_no: int, max_toks: int) -> None:
+            _append_llm_log({
+                "event": event,
+                "call_id": call_id,
+                "attempt": attempt_no,
+                "ts": _utc_now_iso(),
+                "provider": resp_obj.provider or self.provider,
+                "model": resp_obj.model or self.config.model,
+                "temperature": temp,
+                "max_tokens": max_toks,
+                "meta": meta or {},
+                "request": _request_snapshot,
+                "response_text": resp_obj.content,
+                "finish_reason": resp_obj.finish_reason,
+                "usage": {
+                    "prompt": resp_obj.prompt_tokens,
+                    "completion": resp_obj.completion_tokens,
+                    "total": resp_obj.total_tokens,
+                },
+                "duration_sec": resp_obj.duration_sec,
+            })
+
         last_error = None
         for attempt in range(1, self.config.max_retries + 1):
             try:
                 t0 = time.monotonic()
                 # Determine SDK backend: some providers use anthropic-compatible API
                 sdk_hint = PROVIDER_DEFAULTS.get(self.provider, {}).get("sdk", "")
-                if self.provider == "anthropic" or sdk_hint == "anthropic":
+                if self.provider == "claude_cli":
+                    resp = self._call_claude_cli(messages, system, temp, tokens)
+                elif self.provider == "codex_cli":
+                    resp = self._call_codex_cli(
+                        messages, system, temp, tokens, json_schema=json_schema,
+                    )
+                elif self.provider == "anthropic" or sdk_hint == "anthropic":
                     resp = self._call_anthropic(messages, system, temp, tokens)
                 elif self.provider == "gemini":
                     resp = self._call_gemini(messages, system, temp, tokens)
                 else:
-                    # OpenAI-compatible (OpenAI, DeepSeek, Kimi, Qwen)
+                    # OpenAI-compatible (openai, kimi, qwen)
                     resp = self._call_openai_compat(messages, system, temp, tokens)
                 resp.duration_sec = round(time.monotonic() - t0, 3)
+
+                # Persist the raw response BEFORE any parsing (write-before-parse)
+                _log_response(resp, "response", attempt, tokens)
 
                 # Try to parse JSON from content
                 if self.config.json_mode and resp.content:
@@ -257,11 +348,19 @@ class LLMClient:
                     t0 = time.monotonic()
                     if self.provider == "gemini":
                         resp = self._call_gemini(messages, system, temp, retry_tokens)
+                    elif self.provider == "claude_cli":
+                        resp = self._call_claude_cli(messages, system, temp, retry_tokens)
+                    elif self.provider == "codex_cli":
+                        resp = self._call_codex_cli(
+                            messages, system, temp, retry_tokens,
+                            json_schema=json_schema,
+                        )
                     elif self.provider == "anthropic" or sdk_hint == "anthropic":
                         resp = self._call_anthropic(messages, system, temp, retry_tokens)
                     else:
                         resp = self._call_openai_compat(messages, system, temp, retry_tokens)
                     resp.duration_sec = round(time.monotonic() - t0, 3)
+                    _log_response(resp, "response_truncation_retry", attempt, retry_tokens)
                     if self.config.json_mode and resp.content:
                         resp.parsed = self._extract_json(resp.content)
 
@@ -273,6 +372,22 @@ class LLMClient:
 
             except Exception as e:
                 last_error = e
+                # Failed attempts are logged too, so systematic provider
+                # failures (e.g. a Worker falling back to the executor for
+                # most of a run) leave a complete audit trail.
+                _append_llm_log({
+                    "event": "error",
+                    "call_id": call_id,
+                    "attempt": attempt,
+                    "ts": _utc_now_iso(),
+                    "provider": self.provider,
+                    "model": self.config.model,
+                    "temperature": temp,
+                    "max_tokens": tokens,
+                    "meta": meta or {},
+                    "request": _request_snapshot,
+                    "error": f"{type(e).__name__}: {e}",
+                })
                 logger.warning(
                     "LLM call attempt %d/%d failed (%s): %s",
                     attempt, self.config.max_retries, self.provider, e,
@@ -355,24 +470,368 @@ class LLMClient:
 
     # ----- Claude CLI (local `claude` binary, no HTTP API) -----
 
+    def _call_claude_cli(
+        self, messages: List[Dict], system: str, temperature: float, max_tokens: int,
+    ) -> LLMResponse:
+        """Invoke the local `claude` CLI binary instead of the HTTP API.
+
+        Auth is handled by Claude Code's own credential store (OAuth /
+        subscription / keychain), so no API key is required.
+
+        Note: the CLI does not expose `temperature` or `max_tokens` as flags.
+        These config knobs are ignored when calling via CLI; the CLI uses
+        Claude Code's own defaults for sampling.
+        """
+        import subprocess
+        import shutil
+        import tempfile
+
+        # Resolve binary path (config.base_url can override the default `claude`)
+        binary = self._base_url or PROVIDER_DEFAULTS.get(
+            self.provider, {}
+        ).get("binary", "claude")
+        if not shutil.which(binary) and not os.path.isabs(binary):
+            raise RuntimeError(
+                f"Cannot find '{binary}' on PATH. Install Claude Code or set "
+                f"`base_url` in config to the full path of the binary."
+            )
+
+        # Flatten messages into a single user prompt for -p mode.
+        # If multiple messages exist (rare in our stateless flow), we
+        # concatenate them with role markers so the conversation context is
+        # preserved.
+        if len(messages) == 1 and messages[0].get("role", "user") == "user":
+            user_prompt = messages[0]["content"]
+        else:
+            parts = []
+            for m in messages:
+                role = m.get("role", "user").upper()
+                parts.append(f"[{role}]\n{m.get('content','')}")
+            user_prompt = "\n\n".join(parts)
+
+        # Build the command. System prompt goes through a temp file because
+        # our system prompts are large (~10K chars) and embedding via argv
+        # works but is cleaner via --system-prompt-file.
+        cmd = [
+            binary,
+            "-p",                       # non-interactive print mode
+            "--model", self.config.model,
+            "--output-format", "json",
+            "--tools", "",              # pure LLM backend: disable all tools
+        ]
+        sys_path = None
+        if system:
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".txt", delete=False, encoding="utf-8"
+                ) as tf:
+                    tf.write(system)
+                    sys_path = tf.name
+                cmd += ["--system-prompt-file", sys_path]
+            except OSError as e:
+                logger.warning(
+                    "Could not write system prompt to temp file (%s); "
+                    "falling back to inline arg.", e
+                )
+                cmd += ["--system-prompt", system]
+
+        try:
+            result = subprocess.run(
+                cmd,
+                input=user_prompt,
+                capture_output=True,
+                text=True,
+                timeout=self.config.timeout_sec,
+            )
+        except subprocess.TimeoutExpired as e:
+            if sys_path:
+                try:
+                    os.unlink(sys_path)
+                except OSError:
+                    pass
+            raise RuntimeError(
+                f"claude CLI timed out after {self.config.timeout_sec}s"
+            ) from e
+        finally:
+            if sys_path:
+                try:
+                    os.unlink(sys_path)
+                except OSError:
+                    pass
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"claude CLI exited {result.returncode}. "
+                f"stderr: {result.stderr[:500]}"
+            )
+
+        # Parse JSON wrapper
+        try:
+            wrapper = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(
+                f"claude CLI returned non-JSON output (parse error: {e}). "
+                f"First 300 chars: {result.stdout[:300]}"
+            ) from e
+
+        if wrapper.get("is_error"):
+            err = wrapper.get("api_error_status") or wrapper.get("subtype", "unknown")
+            raise RuntimeError(f"claude CLI reported error: {err}")
+
+        content = wrapper.get("result", "") or ""
+        usage = wrapper.get("usage", {}) or {}
+        # input_tokens here counts only the *non-cached* portion; the cached
+        # portion is recorded separately. For consistency with the other
+        # providers we sum cache_creation + cache_read + input_tokens.
+        prompt_tokens = (
+            usage.get("input_tokens", 0)
+            + usage.get("cache_creation_input_tokens", 0)
+            + usage.get("cache_read_input_tokens", 0)
+        )
+        completion_tokens = usage.get("output_tokens", 0)
+
+        return LLMResponse(
+            content=content,
+            model=self.config.model,
+            provider=self.provider,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+            finish_reason=wrapper.get("stop_reason", ""),
+            raw_response=wrapper,
+        )
+
+    # ----- Codex CLI (local `codex exec` binary, no HTTP API) -----
+
+    def _call_codex_cli(
+        self,
+        messages: List[Dict],
+        system: str,
+        temperature: float,
+        max_tokens: int,
+        json_schema: Optional[Dict] = None,
+    ) -> LLMResponse:
+        """Invoke local ``codex exec`` and return its final agent message.
+
+        Auth is handled by Codex's credential store. The CLI does not expose
+        ``temperature`` or ``max_tokens`` controls, so those values are request
+        metadata only and are not effective sampling/output-limit settings for
+        this provider.
+
+        User/history content is always delivered through stdin so large Worker
+        prompts never consume argv space. ``system`` is supplied as Codex
+        ``developer_instructions`` and an optional response schema is supplied
+        through ``--output-schema`` after normalizing a strict Codex-only copy.
+        Stdout is a JSONL event stream; its exact text is retained in
+        ``LLMResponse.raw_response``.
+        """
+        import shutil
+        import subprocess
+        import tempfile
+
+        binary = self._base_url or PROVIDER_DEFAULTS.get(
+            self.provider, {}
+        ).get("binary", "codex")
+        if not shutil.which(binary) and not os.path.isabs(binary):
+            raise RuntimeError(
+                f"Cannot find '{binary}' on PATH. Install Codex CLI or set "
+                f"`base_url` in config to the full path of the binary."
+            )
+
+        if len(messages) == 1 and messages[0].get("role", "user") == "user":
+            user_prompt = messages[0].get("content", "")
+        else:
+            parts = []
+            for message in messages:
+                role = message.get("role", "user").upper()
+                parts.append(f"[{role}]\n{message.get('content', '')}")
+            user_prompt = "\n\n".join(parts)
+
+        cmd = [
+            binary,
+            "exec",
+            "--json",
+            "--ephemeral",
+            "--skip-git-repo-check",
+            "--ignore-user-config",
+            "--ignore-rules",
+            "--sandbox", "read-only",
+            "--model", self.config.model,
+            "--color", "never",
+            "-c", 'approval_policy="never"',
+        ]
+        if system:
+            # JSON string syntax is valid TOML basic-string syntax for the
+            # characters emitted here, and subprocess receives argv directly.
+            encoded_system = json.dumps(system, ensure_ascii=False)
+            cmd += ["-c", f"developer_instructions={encoded_system}"]
+
+        schema_path = None
+        if json_schema:
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".json", delete=False, encoding="utf-8"
+                ) as schema_file:
+                    json.dump(
+                        self._codex_strict_output_schema(json_schema),
+                        schema_file,
+                        ensure_ascii=False,
+                    )
+                    schema_path = schema_file.name
+                cmd += ["--output-schema", schema_path]
+            except OSError as exc:
+                raise RuntimeError(
+                    f"Could not write Codex output schema temp file: {exc}"
+                ) from exc
+
+        # A lone '-' makes stdin the full prompt. Never move user_prompt into
+        # argv: production Worker prompts can contain tens of thousands of
+        # tokens and approach the platform ARG_MAX limit.
+        cmd.append("-")
+
+        try:
+            result = subprocess.run(
+                cmd,
+                input=user_prompt,
+                capture_output=True,
+                text=True,
+                timeout=self.config.timeout_sec,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"codex CLI timed out after {self.config.timeout_sec}s"
+            ) from exc
+        finally:
+            if schema_path:
+                try:
+                    os.unlink(schema_path)
+                except OSError:
+                    pass
+
+        if result.returncode != 0:
+            # Codex reports structured API failures on stdout while routine
+            # startup warnings go to stderr. Preserve stdout in the exception
+            # so chat()'s error record contains the actionable event stream.
+            raise RuntimeError(
+                f"codex CLI exited {result.returncode}. "
+                f"stdout: {result.stdout or '<empty>'} "
+                f"stderr tail: {result.stderr[-2000:]}"
+            )
+
+        raw_event_stream = result.stdout
+        events: List[Dict[str, Any]] = []
+        for line_no, line in enumerate(raw_event_stream.splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    f"codex CLI returned malformed JSONL at line {line_no}: "
+                    f"{exc}. First 300 chars: {line[:300]}"
+                ) from exc
+            if not isinstance(event, dict):
+                raise RuntimeError(
+                    f"codex CLI JSONL line {line_no} is not an object"
+                )
+            events.append(event)
+
+        failure_event = next(
+            (
+                event for event in events
+                if event.get("type") in {"error", "turn.failed"}
+            ),
+            None,
+        )
+        if failure_event is not None:
+            detail = failure_event.get("error") or failure_event.get("message")
+            raise RuntimeError(
+                f"codex CLI reported failure: {detail or failure_event}. "
+                f"Event stream: {raw_event_stream}"
+            )
+
+        agent_messages = []
+        usage: Dict[str, Any] = {}
+        turn_completed = False
+        for event in events:
+            event_type = event.get("type")
+            item = event.get("item")
+            if (
+                event_type == "item.completed"
+                and isinstance(item, dict)
+                and item.get("type") == "agent_message"
+                and isinstance(item.get("text"), str)
+            ):
+                agent_messages.append(item["text"])
+            elif event_type == "turn.completed":
+                turn_completed = True
+                if isinstance(event.get("usage"), dict):
+                    usage = event["usage"]
+
+        if not agent_messages:
+            raise RuntimeError(
+                "codex CLI JSONL contained no completed agent_message"
+            )
+        if not turn_completed:
+            raise RuntimeError(
+                "codex CLI JSONL contained no turn.completed event"
+            )
+
+        # Verified against codex-cli 0.144.2: input_tokens already includes
+        # cached_input_tokens, and output_tokens already includes
+        # reasoning_output_tokens. The cached/reasoning fields are subsets and
+        # must not be added again when computing LLMResponse totals.
+        prompt_tokens = int(usage.get("input_tokens", 0) or 0)
+        completion_tokens = int(usage.get("output_tokens", 0) or 0)
+
+        return LLMResponse(
+            content=agent_messages[-1],
+            model=self.config.model,
+            provider=self.provider,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+            finish_reason="stop",
+            raw_response=raw_event_stream,
+        )
+
+    @staticmethod
+    def _codex_strict_output_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
+        """Return a strict schema copy accepted by Codex structured output.
+
+        Codex requires every object property to appear in ``required`` and
+        disallows undeclared properties. This narrows only the temporary schema
+        sent to the CLI; chat() still validates the parsed response against the
+        caller's original schema after verbatim logging.
+        """
+        def _strictify(node: Any) -> Any:
+            if isinstance(node, list):
+                return [_strictify(item) for item in node]
+            if not isinstance(node, dict):
+                return node
+
+            strict = {key: _strictify(value) for key, value in node.items()}
+            properties = strict.get("properties")
+            if strict.get("type") == "object" and isinstance(properties, dict):
+                strict["required"] = list(properties.keys())
+                strict["additionalProperties"] = False
+            return strict
+
+        return _strictify(schema)
+
+    # ----- OpenAI-compatible -----
+
     def _get_openai_client(self):
         if self._openai_client is None:
             try:
                 from openai import OpenAI
             except ImportError:
                 raise ImportError("pip install openai")
-            kwargs = {
-                "api_key": self._api_key,
-                "base_url": self._base_url or None,
-                "timeout": self.config.timeout_sec,
-            }
-            # Bypass system proxy for Chinese domestic APIs (kimi, qwen).
-            # If your network requires a proxy for these endpoints, remove
-            # this branch or override via OpenAI's http_client argument.
-            if self.provider in ("kimi", "qwen"):
-                import httpx
-                kwargs["http_client"] = httpx.Client(proxy=None, timeout=self.config.timeout_sec)
-            self._openai_client = OpenAI(**kwargs)
+            self._openai_client = OpenAI(
+                api_key=self._api_key,
+                base_url=self._base_url or None,
+                timeout=self.config.timeout_sec,
+            )
         return self._openai_client
 
     def _call_openai_compat(
@@ -384,26 +843,12 @@ class LLMClient:
             msgs.append({"role": "system", "content": system})
         msgs.extend(messages)
 
-        # Kimi K2.6 only supports temperature=1 and needs higher min tokens
-        # (the model has reasoning-mode overhead before producing visible output).
-        if "k2.6" in self.config.model:
-            temperature = 1.0
-            max_tokens = max(max_tokens, 1024)
-
-        # GPT-5.x and the o-series require max_completion_tokens (not
-        # max_tokens); they also do not accept temperature.
-        model_low = self.config.model.lower()
-        use_new_tokens = any(k in model_low for k in ["gpt-5", "o1", "o3", "o4"])
-
         kwargs: Dict[str, Any] = {
             "model": self.config.model,
             "messages": msgs,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
         }
-        if use_new_tokens:
-            kwargs["max_completion_tokens"] = max_tokens
-        else:
-            kwargs["temperature"] = temperature
-            kwargs["max_tokens"] = max_tokens
         if self.config.json_mode:
             kwargs["response_format"] = {"type": "json_object"}
 

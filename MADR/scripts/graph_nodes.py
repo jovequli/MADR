@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LangGraph node functions for MADR calibration.
+"""LangGraph node functions for TRAv2 calibration.
 
 Each function takes CalibrationState and returns a partial state update dict.
 All domain logic is delegated to existing modules; these nodes are pure
@@ -293,10 +293,65 @@ def _get_shared(state: CalibrationState) -> Dict[str, Any]:
         # (spin_up_years ignored with a warning).
         spin_up_shift = 0
         if (spin_up_years > 0 and not eval_period
-                and model_combination in ("swat", "vic_cama_flood")):
+                and model_combination in ("swat", "wflow", "vic_cama_flood")):
             spin_up_shift = spin_up_years
         for w_cfg in worker_cfgs:
             sid = w_cfg["subbasin_id"]
+
+            if model_combination == "wflow":
+                # wflow_sbm basin config has its own field layout (model dir,
+                # Julia run cmd, grid-cell ids, gauge id, simulation dates).
+                # Build a WflowConfig and register; WflowExecutor.register_basin
+                # coerces dict->config. Mirrors the SWAT block below EXACTLY,
+                # including dynamic eval_start/end + spin_up_years attrs.
+                from .wflow_executor import WflowConfig
+                start_date = sim_period.get("start_date") or f"{sim_period.get('start_year', 1987)}-01-01"
+                end_date = sim_period.get("end_date") or f"{sim_period.get('end_year', 2000)}-12-31"
+                wflow_eval_start, wflow_eval_end = eval_start_date, eval_end_date
+                if spin_up_shift:
+                    # Warm-up: simulate from N years earlier, score metrics from
+                    # the original start. wflow_runner sets the per-run config
+                    # dates to [start_date, end_date]; metrics are windowed to
+                    # the original span via eval_start/end below.
+                    wflow_eval_start, wflow_eval_end = start_date, end_date
+                    d = dt.date.fromisoformat(start_date)
+                    try:
+                        d = d.replace(year=d.year - spin_up_shift)
+                    except ValueError:  # Feb 29 -> Feb 28 in non-leap years
+                        d = d.replace(year=d.year - spin_up_shift, day=28)
+                    start_date = d.isoformat()
+                    logger.info(
+                        "spin_up_years=%d (wflow, %s): simulation start "
+                        "shifted to %s, metrics evaluated on %s..%s.",
+                        spin_up_shift, sid, start_date, wflow_eval_start,
+                        wflow_eval_end)
+                scratch_root = cfg.get("wflow_scratch_dir") or cfg.get("swatplus_scratch_dir") or str(output_root)
+                wflow_cfg = WflowConfig(
+                    basin_name=sid,
+                    base_output_dir=str(scratch_root),
+                    wflow_model_dir=w_cfg.get("wflow_model_dir", cfg.get("wflow_model_dir", "")),
+                    wflow_run_cmd=w_cfg.get("wflow_run_cmd", cfg.get("wflow_run_cmd", "")),
+                    obs_file=w_cfg.get("obs_file", ""),
+                    cell_ids=list(w_cfg.get("cell_ids", w_cfg.get("hru_fids", []))),
+                    subbasin_attrs_file=w_cfg.get(
+                        "subbasin_attrs_file",
+                        cfg.get("subbasin_attrs_file", ""),
+                    ),
+                    gauge_id=int(w_cfg.get("gauge_id", 0)),
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                if wflow_eval_start or wflow_eval_end:
+                    # Evaluation window: WflowConfig has no eval fields, so
+                    # attach them dynamically; wflow_runner reads them via
+                    # getattr with an empty default (legacy behavior identical
+                    # when evaluation_period is absent).
+                    wflow_cfg.eval_start_date = wflow_eval_start
+                    wflow_cfg.eval_end_date = wflow_eval_end
+                if spin_up_shift:
+                    wflow_cfg.spin_up_years = spin_up_shift
+                vic_executor.register_basin(sid, wflow_cfg)
+                continue
 
             if model_combination == "swat":
                 # SWAT+ basin config has its own field layout (TxtInOut template,
@@ -490,6 +545,17 @@ class _DummyLLMClient:
 # ---------------------------------------------------------------------------
 # Topology helpers
 # ---------------------------------------------------------------------------
+
+def _is_joint_model(mc: str) -> bool:
+    """True for model combinations that run ONE integrated joint simulation
+    per round with per-worker parameters scoped to disjoint object sets
+    (SWAT+ HRU locking / wflow_sbm cell locking). Both share the batched
+    dispatch, exclusive-set logic, and joint-bundle acceptance; VIC
+    combinations (land->routing) do not. Purely additive: adding "wflow"
+    never changes the "swat" or vic behaviour.
+    """
+    return mc in ("swat", "wflow")
+
 
 def _topology_note(worker_cfgs: List[Dict], outlet_id: str) -> str:
     """Compact human-readable topology line for prompt placeholders.
@@ -830,9 +896,14 @@ def init_calibration(state: CalibrationState) -> Dict[str, Any]:
     upstream_map = _build_upstream_map(worker_cfgs)
     topo_levels = _compute_topo_levels(upstream_map)
     # SWAT+ executes the whole watershed as ONE joint simulation per round
-    # (see _execute_batch_workers_swat), so upstream-first level sequencing
-    # is meaningless: collapse all topo levels into a single batch.
-    if cfg.get("model_combination", "vic_routing") == "swat" and len(topo_levels) > 1:
+    # (see _execute_batch_workers_swat). By default upstream-first level
+    # sequencing is collapsed into a single batch. When the config opts in
+    # with "nested_param_lock": true, the topo levels are PRESERVED so each
+    # level calibrates in turn with upstream sub-basins locked at their
+    # already-calibrated centers (same-round upstream->downstream lock).
+    if (_is_joint_model(cfg.get("model_combination", "vic_routing"))
+            and len(topo_levels) > 1
+            and not cfg.get("nested_param_lock", False)):
         topo_levels = [sorted(upstream_map.keys())]
 
     # Parameter ranges
@@ -849,18 +920,9 @@ def init_calibration(state: CalibrationState) -> Dict[str, Any]:
     centers = {w["subbasin_id"]: dict(initial_center) for w in worker_cfgs}
     radii = {w["subbasin_id"]: dict(initial_radius) for w in worker_cfgs}
 
-    # Phase pipeline.  The configured/CLI cap counts optimization rounds.
-    # One additional slot is always reserved for the mandatory force-best
-    # verification run, so a full pipeline never loses its last search round.
+    # Phase pipeline
     phase_pipeline = load_phase_pipeline(cfg)
-    cli_max_rounds = int(state.get("max_rounds", 0) or 0)
-    config_max_rounds = int(cfg.get("max_rounds", 0) or 0)
-    optimization_max_rounds = (
-        cli_max_rounds
-        or config_max_rounds
-        or get_total_max_rounds(phase_pipeline)
-    )
-    max_rounds = optimization_max_rounds + 1
+    max_rounds = state.get("max_rounds", 0) or get_total_max_rounds(phase_pipeline)
 
     # Objective weights and stop rules
     objective_weights = cfg.get("objective_weights", {"mean_nse": 0.90, "consistency": 0.10})
@@ -890,9 +952,7 @@ def init_calibration(state: CalibrationState) -> Dict[str, Any]:
         "team_config": state.get("team_config_path", ""),
         "output_root": str(output_root),
         "mode": state.get("mode", "simulate"),
-        "optimization_max_rounds": optimization_max_rounds,
         "max_rounds": max_rounds,
-        "final_round_is_additional": True,
         "objective_weights": objective_weights,
         "stop_rules": stop_rules,
         "initial_phase": phase_pipeline[0]["name"] if phase_pipeline else "VIC_ONLY",
@@ -907,8 +967,7 @@ def init_calibration(state: CalibrationState) -> Dict[str, Any]:
     _SHARED.clear()
 
     print(f"  Calibration initialized: {len(worker_cfgs)} basins, "
-          f"{len(phase_pipeline)} phases, {optimization_max_rounds} optimization "
-          f"rounds + 1 final verification round")
+          f"{len(phase_pipeline)} phases, {max_rounds} total rounds")
 
     return {
         "worker_cfgs": worker_cfgs,
@@ -923,7 +982,6 @@ def init_calibration(state: CalibrationState) -> Dict[str, Any]:
         "stop_rules": stop_rules,
         "phase_pipeline": phase_pipeline,
         "phase_nse_thresholds": phase_nse_thresholds,
-        "optimization_max_rounds": optimization_max_rounds,
         "max_rounds": max_rounds,
         "max_parallel_workers": int(cfg.get("max_parallel_workers", 4)),
         "centers": centers,
@@ -1097,7 +1155,7 @@ def run_exploration(state: CalibrationState) -> Dict[str, Any]:
     results = run_initial_exploration(
         orchestrator=adapter,
         n_near=int(explore_cfg.get("n_near", 10)),
-        n_random=int(explore_cfg.get("n_random", 40)),
+        n_random=int(explore_cfg.get("n_random", 20)),
     )
     summary = format_exploration_summary(results)
 
@@ -1109,7 +1167,7 @@ def run_exploration(state: CalibrationState) -> Dict[str, Any]:
     }
     _write_json(output_root / "initial_exploration.json", explore_out)
 
-    # Save full per-basin exploration results.
+    # Save full per-basin exploration results (all 31 samples)
     explore_dir = output_root / "exploration"
     _ensure_dir(explore_dir)
     for sid, r in results.items():
@@ -1139,10 +1197,10 @@ def round_start(state: CalibrationState) -> Dict[str, Any]:
     A round is the FINAL force-best round if either:
       - `force_final_round` flag was set by check_phase_transition_node
         (last phase ended via patience or max_rounds), OR
-      - the extra final slot after the optimization-round cap is reached.
+      - the global max_rounds safety cap is reached.
     """
     round_id = state.get("round_id", 0) + 1
-    max_rounds = state["max_rounds"]  # includes one extra final slot
+    max_rounds = state["max_rounds"]
     force_final = state.get("force_final_round", False)
     is_final = force_final or (round_id >= max_rounds)
     phase_name = state["current_phase_name"]
@@ -1230,12 +1288,13 @@ def execute_batch_workers(state: CalibrationState) -> Dict[str, Any]:
     # SWAT+ executes jointly: all workers' params go into ONE batched
     # simulation per strategy (proposals stay per-worker). Non-swat
     # combinations keep the per-worker path below unchanged.
-    if state.get("model_combination", "vic_routing") == "swat":
+    if _is_joint_model(state.get("model_combination", "vic_routing")):
         if hasattr(_get_shared(state)["vic_executor"], "run_batched"):
             return _execute_batch_workers_swat(state, sids)
         logger.warning(
-            "model_combination='swat' but executor %s lacks the run_batched "
+            "joint model_combination %r but executor %s lacks the run_batched "
             "interface; falling back to legacy per-worker execution.",
+            state.get("model_combination"),
             type(_get_shared(state)["vic_executor"]).__name__,
         )
 
@@ -1467,7 +1526,7 @@ def _run_worker_multi(
     worker, vic_executor, round_id, center, radius, guidance,
     round_dir, n_candidates, phase, up_routing, up_soil, up_cama=None,
 ) -> Tuple[Dict, str]:
-    """Run an LLM-based multi-candidate Worker round.
+    """Run multi-candidate worker round (TRAv2: LLM-based).
 
     1. Call Worker LLM n_candidates times (conservative / moderate / bold).
     2. Each call produces a full parameter set directly.
@@ -1847,7 +1906,8 @@ def _execute_batch_workers_swat(state: CalibrationState, sids: List[str]) -> Dic
     n_candidates = state.get("mc_n_candidates", 5)
     max_parallel = state.get("max_parallel_workers", 4)
     round_dir = Path(state["round_dir"])
-    locked_keys = set(get_locked_keys(phase, model_combination="swat"))
+    locked_keys = set(get_locked_keys(
+        phase, model_combination=state.get("model_combination", "swat")))
     t0 = dt.datetime.now(dt.timezone.utc)
 
     # ── Optional probe mode: deterministic single-parameter strategies ──
@@ -1954,20 +2014,17 @@ def _execute_batch_workers_swat(state: CalibrationState, sids: List[str]) -> Dic
             best_metrics = best_record.get("metrics", {}) if best_record else {}
 
         if force_best:
-            # Restore the ENTIRE joint best bundle: every worker's params come
-            # from the same accepted round/strategy, then run ONE joint
-            # simulation. Per-worker ledger bests (below) only remain as the
-            # fallback for resumed pre-bundle checkpoints without a bundle.
-            best_bundle = state.get("swat_best_bundle")
-            bundle_params = ((best_bundle or {}).get("params_by_sid") or {}).get(sid)
-            if bundle_params:
-                candidates = [(dict(bundle_params), "force_best",
-                               f"force_best: joint best bundle (round "
-                               f"{best_bundle.get('round_id')}, strategy "
-                               f"{best_bundle.get('strategy_index')})")]
-            elif best_record and best_record.get("params"):
+            # Per-basin historical best across ALL rounds (mirrors the VIC
+            # _run_worker_single force_best path): each worker restores the
+            # params from the round where ITS OWN NSE was highest, then all
+            # workers run ONE joint simulation. Params may come from different
+            # rounds; the nested joint run then reports the true combined NSEs
+            # (which can differ slightly from each basin's recorded best).
+            if best_record and best_record.get("params"):
                 candidates = [(dict(best_record["params"]), "force_best",
-                               "force_best: reused historical best params per basin")]
+                               f"force_best: per-basin historical best "
+                               f"(round {best_record.get('round_id')}, "
+                               f"NSE={best_record.get('nse')})")]
             else:
                 candidates = [(dict(center), "force_best",
                                "force_best: no ledger history, used current center")]
@@ -2084,10 +2141,21 @@ def _execute_batch_workers_swat(state: CalibrationState, sids: List[str]) -> Dic
     # ── Step 2: joint execution — ONE batched run per strategy index ──
     # apply_order is OUTER (downstream) first, INNER (upstream) last, so
     # nested gauges' HRU sets stay exclusive (see compute_exclusive_hru_sets).
+    #
+    # NESTED LOCK: when topo levels are preserved (nested_param_lock), `sids`
+    # is a single topo level. The other workers must still appear in the
+    # batched run so calibration.cal stays complete and the UPSTREAM (already
+    # calibrated) sub-basins are locked at their current centers while only
+    # this level's workers vary. frozen_sids is empty when levels are
+    # collapsed, so the single-batch behaviour is unchanged.
+    all_sids = [w["subbasin_id"] for w in state["worker_cfgs"]]
+    frozen_sids = [s for s in all_sids if s not in sids]
+    frozen_params = {s: dict(state["centers"][s]) for s in frozen_sids}
+    order_sids = set(sids) | set(frozen_sids)
     topo = _compute_topo_levels(state["upstream_map"])
-    apply_order = [s for level in reversed(topo) for s in sorted(level) if s in proposals]
-    for s in sids:
-        if s in proposals and s not in apply_order:
+    apply_order = [s for level in reversed(topo) for s in sorted(level) if s in order_sids]
+    for s in list(sids) + frozen_sids:
+        if s in order_sids and s not in apply_order:
             apply_order.append(s)
     outlet_id = (state["team_config"].get("outlet_subbasin_id")
                  or next((w["subbasin_id"] for w in state["worker_cfgs"]
@@ -2103,6 +2171,9 @@ def _execute_batch_workers_swat(state: CalibrationState, sids: List[str]) -> Dic
             params, label, _ = cands[min(k, len(cands) - 1)]
             per_worker_params[sid] = params
             labels_by_sid[sid] = label
+        # locked upstream/other levels: frozen at their calibrated centers
+        for s in frozen_sids:
+            per_worker_params[s] = frozen_params[s]
         tag = f"round_{round_id}_joint_k{k+1}"
         msg = (f"SWAT batched run: {len(sids)} workers, strategy {k+1}/{n_strategies} "
                f"(round {round_id}, tag={tag})")
@@ -2390,7 +2461,7 @@ def collect_batch_results(state: CalibrationState) -> Dict[str, Any]:
     # pre-collapse checkpoint with partial batches degrades to the legacy
     # per-worker updates with a warning.
     swat_joint = False
-    if state.get("model_combination", "vic_routing") == "swat" and batch_results:
+    if _is_joint_model(state.get("model_combination", "vic_routing")) and batch_results:
         all_sids = {w["subbasin_id"] for w in state["worker_cfgs"]}
         batch_sids = {r["subbasin_id"] for r in batch_results}
         swat_joint = batch_sids == all_sids
@@ -2697,13 +2768,26 @@ def _write_worker_diagnostic_md(
         f"- peak_ratio: {_f(metrics.get('peak_ratio'), '.3f')}",
         f"- lowflow_ratio: {_f(metrics.get('lowflow_ratio'), '.3f')}",
         f"- peak_timing_bias_days: {_f(metrics.get('peak_timing_bias_days'), '.1f')}",
+        f"- recession_k_ratio: {_f(metrics.get('recession_k_ratio'), '.2f')}",
+        f"- baseflow_index_bias_pct: {_f(metrics.get('baseflow_index_bias_pct'), '.1f')}",
         "",
         "## Diagnosis",
         f"- Primary issue: {diag.get('primary_issue', 'N/A')} ({diag.get('severity', 'N/A')})",
         f"- Severity score: {_f(diag.get('severity_score'), '.2f')}",
         f"- Improvement trend: {diag.get('improvement_trend', 'N/A')}",
-        f"- VIC responsibility: {_f(diag.get('vic_responsibility'), '.0%')}",
-        f"- Routing responsibility: {_f(diag.get('routing_responsibility'), '.0%')}",
+    ]
+    # VIC/routing error split: VIC combos only. SWAT+ is integrated -> the
+    # values are NaN/absent, so these lines are skipped for it.
+    def _finite(v):
+        try:
+            return v is not None and not (math.isnan(float(v)) or math.isinf(float(v)))
+        except (TypeError, ValueError):
+            return False
+    if _finite(diag.get("vic_responsibility")):
+        lines.append(f"- VIC responsibility: {_f(diag.get('vic_responsibility'), '.0%')}")
+    if _finite(diag.get("routing_responsibility")):
+        lines.append(f"- Routing responsibility: {_f(diag.get('routing_responsibility'), '.0%')}")
+    lines += [
         f"- Upstream responsibility: {_f(diag.get('upstream_responsibility'), '.0%')}",
         "",
         f"### Reasoning",
@@ -2789,6 +2873,12 @@ def leader_review(state: CalibrationState) -> Dict[str, Any]:
             messages=[{"role": "user", "content": review_prompt}],
             system=system_prompt,
             json_schema=leader.output_schema,
+            meta={
+                "role": "leader",
+                "round": round_id,
+                "phase": str(phase),
+                "n_worker_results": len(worker_results or []),
+            },
         )
         leader_tokens = {
             "prompt": llm_resp.prompt_tokens,
@@ -2873,7 +2963,7 @@ def update_search_state(state: CalibrationState) -> Dict[str, Any]:
     # per-worker NSE improvement must not move them here (that would
     # rebuild the mixed-round parameter field the bundle exists to prevent).
     swat_bundle = (state.get("swat_best_bundle")
-                   if model_combination == "swat" else None)
+                   if _is_joint_model(model_combination) else None)
     swat_bundle_accepted = (swat_bundle is not None
                             and swat_bundle.get("round_id") == state["round_id"])
 
@@ -2886,7 +2976,7 @@ def update_search_state(state: CalibrationState) -> Dict[str, Any]:
         new_nse = result.get("metrics", {}).get("NSE", float("-inf"))
         worker_best = workers[sid].ledger.get_best_nse()
 
-        if model_combination != "swat" and new_nse >= worker_best:
+        if not _is_joint_model(model_combination) and new_nse >= worker_best:
             new_center = normalize_params(
                 result.get("best_params", centers[sid]), param_ranges,
             )
@@ -2920,7 +3010,7 @@ def update_search_state(state: CalibrationState) -> Dict[str, Any]:
         # Anti-flip direction update. SWAT improvement is watershed-level:
         # this round's joint bundle was accepted as a whole.
         raw_hints = guidance.get("param_adjustments", []) if guidance else []
-        if model_combination == "swat":
+        if _is_joint_model(model_combination):
             improved = swat_bundle_accepted
         else:
             improved = new_nse >= worker_best
@@ -3027,7 +3117,7 @@ def record_round(state: CalibrationState) -> Dict[str, Any]:
     # SWAT: note which joint bundle is the current watershed-level best
     # (ledgers keep their per-worker entries above; they just no longer
     # drive swat centers).
-    if state.get("model_combination", "vic_routing") == "swat":
+    if _is_joint_model(state.get("model_combination", "vic_routing")):
         bundle = state.get("swat_best_bundle")
         if bundle is not None:
             meta["swat_best_bundle"] = {
@@ -3114,7 +3204,7 @@ def check_phase_transition_node(state: CalibrationState) -> Dict[str, Any]:
     # any bundle exists, e.g. a resumed pre-bundle checkpoint) keep the
     # legacy mean_sub_nse plateau rule unchanged.
     swat_bundle = (state.get("swat_best_bundle")
-                   if state.get("model_combination", "vic_routing") == "swat"
+                   if _is_joint_model(state.get("model_combination", "vic_routing"))
                    else None)
     if swat_bundle is not None:
         improved_this_round = swat_bundle.get("round_id") == state.get("round_id")
@@ -3265,8 +3355,6 @@ def finalize(state: CalibrationState) -> Dict[str, Any]:
         "output_root": str(output_root),
         "mode": state.get("mode", "simulate"),
         "rounds_executed": state.get("round_id", 0),
-        "optimization_max_rounds": state.get("optimization_max_rounds", 0),
-        "final_round_is_additional": True,
         "final_phase": state.get("current_phase_name", ""),
         "phase_history": state.get("phase_history", []),
         "best_round": best.get("round_id", -1),

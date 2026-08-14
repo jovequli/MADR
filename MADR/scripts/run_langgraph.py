@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI entry point for LangGraph-based MADR calibration.
+"""CLI entry point for LangGraph-based TRAv2 calibration.
 
 Replaces orchestrator.main() with LangGraph graph execution.
 Supports:
@@ -7,22 +7,22 @@ Supports:
 - --output-root: override output directory
 - --resume: resume from last checkpoint
 - --dry-run: skip LLM calls, use rule-based fallback
-- --max-rounds: override optimization rounds (final verification is additional)
+- --max-rounds: override max rounds
 - --log-level: logging level
 
 Usage:
     python -m scripts.run_langgraph \
-        --team-config configs/vic_routing_bengbu.json \
+        --team-config configs/bengbu_1979_1980.json \
         --output-root /path/to/outputs
 
     # Resume from checkpoint:
     python -m scripts.run_langgraph \
-        --team-config configs/vic_routing_bengbu.json \
-        --output-root output/vic_routing_bengbu --resume
+        --team-config configs/bengbu_1979_1980.json \
+        --resume
 
     # Dry run (no LLM calls):
     python -m scripts.run_langgraph \
-        --team-config configs/vic_routing_bengbu.json \
+        --team-config configs/bengbu_1979_1980.json \
         --dry-run --max-rounds 3
 """
 
@@ -32,6 +32,7 @@ import argparse
 import datetime as dt
 import json
 import logging
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -46,6 +47,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 from .graph_builder import compile_graph
 from .graph_state import CalibrationState
+from .provenance import write_provenance
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +59,7 @@ def load_team_config(path: str) -> dict:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="LangGraph-based MADR calibration orchestrator."
+        description="LangGraph-based TRAv2 calibration orchestrator."
     )
     p.add_argument(
         "--team-config", required=True,
@@ -86,8 +88,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--max-rounds", type=int, default=0,
-        help="Override optimization rounds, excluding the additional final "
-             "force-best verification (0 = use config or pipeline sum).",
+        help="Override max rounds (0 = use config/pipeline sum).",
     )
     p.add_argument(
         "--log-level", default="INFO",
@@ -126,6 +127,21 @@ def main() -> int:
         tag = dt.datetime.now().strftime("%Y%m%d_%H%M")
         output_root = f"/tmp/agent_team_cali_lg_{tag}"
     Path(output_root).mkdir(parents=True, exist_ok=True)
+
+    # Verbatim LLM call log (write-before-parse), consumed by llm_client.chat().
+    # setdefault so an externally supplied MADR_LLM_LOG wins if already set.
+    os.environ.setdefault(
+        "MADR_LLM_LOG", str(Path(output_root) / "llm_calls.jsonl")
+    )
+
+    # One-time provenance snapshot: config content, prompt templates,
+    # code version, environment. Additive; never blocks the run.
+    write_provenance(
+        Path(output_root),
+        resolved_config=cfg,
+        config_source_path=args.team_config,
+        project_dir=SKILL_ROOT,
+    )
 
     # Mode
     mode = cfg.get("model_binding", {}).get("mode", "simulate")
@@ -188,6 +204,19 @@ def main() -> int:
             print(f"  Best round: {summary.get('best_round', '?')}")
             print(f"  Best J_total: {summary.get('best_global_score', '?'):.5f}")
             print(f"  Output: {summary.get('output_root', '?')}")
+            print(
+                "\n  Tiered cleanup (dry-run by default, add --apply to execute):\n"
+                f"    python -m scripts.archive_run --run-dir {output_root}"
+            )
+
+    # Convergence plot (failure-tolerant; skipped if matplotlib missing)
+    try:
+        from .plot_convergence import plot_run
+        png = plot_run(Path(output_root))
+        if png:
+            print(f"  Convergence plot: {png}")
+    except Exception as e:
+        logger.warning("Convergence plot failed (non-fatal): %s", e)
 
     # Clean up
     conn.close()

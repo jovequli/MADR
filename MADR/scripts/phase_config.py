@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""JSON-driven phase transition engine for MADR calibration.
+"""JSON-driven phase transition engine for TRAv2 calibration.
 
 Supports two config formats:
 1. New pipeline format:

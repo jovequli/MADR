@@ -2,7 +2,7 @@
 
 You coordinate per-gauge workers calibrating SWAT+ for a nested basin. SWAT+
 uses HRUs (Hydrologic Response Units) and integrated routing — there is no
-separate routing phase. All 18 parameters below are tunable in every round
+separate routing phase. All 19 parameters below are tunable in every round
 of phase SWATPLUS_HRU. The run config is the authoritative source for
 parameter bounds (`param_ranges`) and default centers (`initial_param_center`);
 the ranges below are the standard values for this combination.
@@ -12,11 +12,21 @@ Parameter changes are applied via `calibration.cal`. The three change-types:
 - `abschg` — add this value to the current value.
 - `pctchg` — multiply current value by `(1 + value/100)` — preserves
   spatial heterogeneity, mandatory for spatially varying params like
-  `cn2`, `awc`, `sol_k`.
+  `cn2`, `awc`, `k`, `ovn`, `chn`.
 
-## The 18 Calibration Parameters (SWAT+)
+## Official SWAT+ guidance (rough reference — adapt, don't follow strictly)
 
-### cn2 (SCS Curve Number, -25 to +25 pctchg)
+The SWAT+ manual recommends two passes: (1) fix the annual WATER BALANCE /
+PBIAS and the runoff partitioning first, using the "soft" levers `esco`/`petco`
+(ET), `cn3_swf` (surface runoff), and `perco` (surface-vs-baseflow split);
+then (2) refine PEAKS and RECESSIONS (timing/shape) with `cn2`, `surlag`,
+`alpha`, `chn`. Keep every parameter in a physically realistic range. This
+sequence is only a guideline — adapt it to this basin, don't treat it as a
+fixed recipe.
+
+## The 19 Calibration Parameters (SWAT+)
+
+### cn2 (SCS Curve Number, -50 to +50 pctchg)
 **Local**: Largest driver of storm-peak magnitude per HRU.
 **Cross-basin**: When an upstream basin has cn2 too high, it generates flashy
 runoff that arrives at downstream basins as sharp inflow peaks. If a
@@ -75,12 +85,24 @@ Water-table depth threshold for baseflow / return flow. NOTE: Controls baseflow,
 ### deep_seep (Deep Percolation Fraction, 0.001 to 0.4, absval)
 Fraction of aquifer recharge that escapes downward to deep storage. Matters most in fissured / karst / deep-percolation regions where real deep losses are non-negligible.
 
-### Snow parameters (Tangnaihai only)
-- `snofall_tmp` (-5 to 5°C): temperature below which precip is snow.
-- `snomelt_tmp` (-5 to 5°C): temperature above which snowpack melts.
-- `snomelt_max` (0-10 mm/°C/day): maximum melt rate (summer solstice).
-- `snomelt_min` (0-10 mm/°C/day): minimum melt rate (winter solstice).
-- `snomelt_lag` (0-1): snowpack temperature lag factor.
+### petco (PET Adjustment Factor, 0.5 to 1.5, absval)
+Scales potential ET. Higher → more ET → less runoff. Water-balance lever alongside esco.
+
+### cn3_swf (Soil-Water Factor for CN3, 0.01 to 0.99, absval)
+Controls how fast the curve number rises to its wet-condition value as soil wets.
+
+### ovn (Overland-Flow Manning n, ±50%, pctchg)
+**Local**: Higher → slower, smoother storm peaks. A timing lever that preserves volume.
+
+### k (Soil Saturated Hydraulic Conductivity, ±80%, pctchg)
+**Local**: Higher → more infiltration, less surface runoff, more subsurface flow.
+**Cross-basin**: One of the most sensitive soil params — small changes shift the runoff/infiltration split at every gauge.
+
+### bf_max (Maximum Baseflow Rate, ±50%, pctchg)
+Caps the baseflow an aquifer delivers to its channel. Higher → higher sustained low-flow plateau.
+
+### chn (Channel Manning n, ±50%, pctchg)
+**Cross-basin**: The primary OUTLET-timing lever. Higher → slower channel routing → later, attenuated peaks at downstream gauges.
 
 NOTE: `gw_delay` is DISABLED in SWAT+ source. Do NOT propose it.
 
@@ -95,8 +117,9 @@ basin-specific tuning.
 Common causes for SWAT+:
 1. **Error accumulation**: multiple upstream flows compound small errors at
    the downstream confluence.
-2. **Channel routing in the downstream reach**: rare in SWAT+ (integrated)
-   but possible via `CH_N2` (Manning's n) — not in this 18-param set.
+2. **Channel routing in the downstream reach**: tune `chn` (channel
+   Manning's n) — now in the 19-param set — to slow and attenuate the
+   flood wave reaching the downstream gauge.
 3. **Basin heterogeneity**: the downstream basin's own HRUs may have very
    different hydrology.
 
@@ -112,14 +135,15 @@ finer-grained tuning.
 
 ## Parameter Sensitivity Ranking
 
-cn2 > esco > awc > alpha ≈ surlag > perco > epco > flo_min > deep_seep > lat_ttime > revap_co > revap_min > canmx (+ snow params in snow-dominated basins)
+cn2 > esco > k > awc > alpha ≈ surlag > chn ≈ ovn > perco > epco > flo_min > petco > deep_seep > lat_ttime > bf_max > cn3_swf > revap_co > revap_min > canmx
 
 1. **cn2** — flood peaks. Adjust FIRST with pctchg.
 2. **esco** — water-balance / PBIAS.
 3. **awc** — soil storage and peak smoothing (pctchg).
 4. **alpha, surlag** — recession and peak timing.
 5. **perco, epco** — baseflow partition and ET.
-6. **flo_min, deep_seep, lat_ttime, revap_co, revap_min, canmx** — fine-tune.
+6. **k, chn, ovn** — infiltration split (k) and outlet timing (chn, ovn).
+7. **flo_min, deep_seep, lat_ttime, bf_max, petco, cn3_swf, revap_co, revap_min, canmx** — fine-tune.
 
 ## Initial Parameter Priors
 

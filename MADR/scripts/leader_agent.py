@@ -21,6 +21,7 @@ from .param_validator import (
     ROUTING_PARAM_KEYS,
     CAMA_PARAM_KEYS,
     SWAT_PARAM_KEYS,
+    WFLOW_PARAM_KEYS,
     DEFAULT_RANGES,
     CalibrationPhase,
     get_tunable_keys,
@@ -63,6 +64,11 @@ TRAJECTORY_COLUMNS: Dict[str, List[Tuple[str, str, str]]] = {
         ("soil_d2", "d2", ".2f"), ("soil_d3", "d3", ".2f"),
         ("Hc", "Hc", ".3f"), ("Hmin", "Hmin", ".3f"),
         ("Wc", "Wc", ".3f"), ("Wmin", "Wmin", ".3f"),
+    ],
+    "wflow": [
+        ("KsatHorFrac", "KsHF", ".3g"), ("KsatVer", "KsV", ".3g"),
+        ("f", "f", ".3g"), ("SoilThickness", "SoilT", ".3g"),
+        ("N", "N", ".3g"), ("N_River", "NRiv", ".3g"),
     ],
 }
 
@@ -686,6 +692,12 @@ class LeaderAgent:
                 messages=messages,
                 system=self.system_prompt,
                 json_schema=self.output_schema,
+                meta={
+                    "role": "leader",
+                    "round": round_id,
+                    "phase": str(phase) if phase is not None else "",
+                    "n_worker_results": len(worker_results or []),
+                },
             )
             # Validate and parse
             decision = llm_resp.parsed
@@ -885,6 +897,31 @@ class LeaderAgent:
                         adjustments.append({"param": "flo_min", "direction": "decrease", "magnitude": "small", "reasoning": "Low flow too high: decrease flo_min to reduce baseflow"})
                     if "deep_seep" not in locked:
                         adjustments.append({"param": "deep_seep", "direction": "increase", "magnitude": "small", "reasoning": "Low flow too high: divert recharge to deep storage"})
+            elif self.model_combination == "wflow":
+                # wflow_sbm menu (prompts/wflow/param_knowledge_leader.md).
+                # KsatHorFrac is the primary knob (baseflow fraction / peak
+                # attenuation); N/N_River are LAST-resort routing levers and
+                # must NOT compensate for runoff/groundwater errors.
+                param_menu = list(WFLOW_PARAM_KEYS)
+                # Peaks: raise KsatHorFrac to lower/flatten peaks (more lateral
+                # subsurface flow), lower it for flashier peaks.
+                if "KsatHorFrac" not in locked and isinstance(pr, (int, float)):
+                    if pr > 1.05:
+                        adjustments.append({"param": "KsatHorFrac", "direction": "increase", "magnitude": "small", "reasoning": "Peak too high: more lateral subsurface flow"})
+                    elif pr < 0.95:
+                        adjustments.append({"param": "KsatHorFrac", "direction": "decrease", "magnitude": "small", "reasoning": "Peak too low: less lateral subsurface flow"})
+                # Low flows: raise SoilThickness / lower f to sustain baseflow;
+                # opposite to drain faster.
+                if isinstance(lr, (int, float)) and lr < 0.9:
+                    if "SoilThickness" not in locked:
+                        adjustments.append({"param": "SoilThickness", "direction": "increase", "magnitude": "small", "reasoning": "Low flow too low: more soil storage sustains baseflow"})
+                    if "f" not in locked:
+                        adjustments.append({"param": "f", "direction": "decrease", "magnitude": "small", "reasoning": "Low flow too low: slower KsatVer decay sustains baseflow"})
+                elif isinstance(lr, (int, float)) and lr > 1.1:
+                    if "SoilThickness" not in locked:
+                        adjustments.append({"param": "SoilThickness", "direction": "decrease", "magnitude": "small", "reasoning": "Low flow too high: less soil storage"})
+                    if "f" not in locked:
+                        adjustments.append({"param": "f", "direction": "increase", "magnitude": "small", "reasoning": "Low flow too high: faster KsatVer decay"})
             else:
                 # VIC-based combinations share the soil-parameter heuristics.
                 if self.model_combination == "vic_cama_flood":

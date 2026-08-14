@@ -21,6 +21,7 @@ from .param_validator import (
     SOIL_PARAM_KEYS,
     ROUTING_PARAM_KEYS,
     SWAT_PARAM_KEYS,
+    WFLOW_PARAM_KEYS,
     DEFAULT_RANGES,
     CalibrationPhase,
     get_tunable_keys,
@@ -150,6 +151,39 @@ class WorkerMemory:
         cols = [(k, k, ".3g", None) for k in shown]
         return cols, note
 
+    def _wflow_varied_cols(self) -> Tuple[List[Tuple[str, str, str, Any]], str]:
+        """Pick wflow_sbm param columns: params that VARIED across history.
+
+        Mirrors :meth:`_swat_varied_cols` but over WFLOW_PARAM_KEYS (6 knobs).
+        Capped at 10 columns (never hit with 6 params); most-varied first.
+        """
+        keys = [k for k in WFLOW_PARAM_KEYS
+                if any(k in e.get("params", {}) for e in self.history)]
+        if not keys:
+            keys = list(WFLOW_PARAM_KEYS)
+
+        def _n_distinct(k):
+            vals = set()
+            for e in self.history:
+                v = e.get("params", {}).get(k)
+                try:
+                    vals.add(format(float(v), ".6g"))
+                except (ValueError, TypeError):
+                    vals.add("?")
+            return len(vals)
+
+        distinct = {k: _n_distinct(k) for k in keys}
+        varied = sorted(
+            [k for k in keys if distinct[k] > 1],
+            key=lambda k: (-distinct[k], keys.index(k)),
+        )
+        shown = varied[:10] if varied else keys[:10]
+        hidden_static = [k for k in keys if distinct[k] <= 1 and k not in shown]
+        note = ("[hidden (never changed): " + ", ".join(hidden_static) + "]"
+                if hidden_static else "")
+        cols = [(k, k, ".3g", None) for k in shown]
+        return cols, note
+
     def format_full_history_table(
         self,
         phase: str = "VIC_ONLY",
@@ -223,6 +257,10 @@ class WorkerMemory:
             # Single-phase SWATPLUS_HRU (JOINT alias included).
             param_cols, header_note = self._swat_varied_cols()
             metric_cols = m_base + [m_lowflow]
+        elif combo == "wflow":
+            # Single-phase WFLOW_SBM (JOINT alias included).
+            param_cols, header_note = self._wflow_varied_cols()
+            metric_cols = m_base + [m_lowflow, m_timing]
         else:  # vic_routing — legacy headers/rows preserved byte-identically
             if phase_upper == "ROUTING_ONLY":
                 param_cols = rout_cols
@@ -448,6 +486,13 @@ class WorkerAgent:
             llm_resp = self.llm.chat(
                 messages=[{"role": "user", "content": prompt}],
                 system=self.system_prompt,
+                meta={
+                    "role": "worker",
+                    "subbasin": self.subbasin_id,
+                    "round": round_id,
+                    "phase": str(phase),
+                    "leader_context": bool(leader_context),
+                },
             )
 
             # Capture token usage from LLM response
@@ -569,6 +614,8 @@ class WorkerAgent:
             # land/routing split — routing is internal to the model).
             if self.model_combination == "swat":
                 resp_label = "Model: SWAT+ (integrated land+channel)"
+            elif self.model_combination == "wflow":
+                resp_label = "Model: wflow_sbm (integrated land+channel)"
             elif self.model_combination == "vic_cama_flood":
                 resp_label = (
                     f"VIC={diagnosis.vic_responsibility:.0%} "
@@ -635,6 +682,17 @@ class WorkerAgent:
         else:
             bounds = {k: list(v) for k, v in self.ranges.items()}
             frozen_note = ""
+            # SWAT nested lock: an upstream sub-basin's calibrated params are
+            # frozen for the downstream levels. Signal it in the propose prompt
+            # so the worker keeps changes to its own HRUs. SWAT path only —
+            # the VIC phase branches above are unchanged.
+            if getattr(self, "model_combination", "") in ("swat", "wflow") and self.neighbors_downstream:
+                _own = "HRUs" if self.model_combination == "swat" else "grid cells"
+                frozen_note = (
+                    "NESTED LOCK: your calibrated parameters will be FROZEN for "
+                    "downstream sub-basins " + ", ".join(self.neighbors_downstream) +
+                    "; propose ONLY for your own " + _own + "."
+                )
 
         return self.propose_template.format(
             subbasin_id=self.subbasin_id,
@@ -795,20 +853,24 @@ class WorkerAgent:
         ledger_summary = self.ledger.summary()
         best_record = self.ledger.get_best_params()
 
+        diag_dict = {
+            "primary_issue": diagnosis.primary_issue,
+            "severity": diagnosis.severity,
+            "severity_score": diagnosis.severity_score,
+            "upstream_responsibility": diagnosis.upstream_responsibility,
+            "reasoning": diagnosis.reasoning,
+            "improvement_trend": diagnosis.improvement_trend,
+            "recommendations": diagnosis.recommendations,
+        }
+        # VIC/routing error split applies to VIC combinations only; SWAT+ is an
+        # integrated model (no land/routing split), so these are omitted for it.
+        if getattr(self, "model_combination", "") not in ("swat", "wflow"):
+            diag_dict["vic_responsibility"] = diagnosis.vic_responsibility
+            diag_dict["routing_responsibility"] = diagnosis.routing_responsibility
         return {
             "subbasin_id": self.subbasin_id,
             "station_code": self.station_code,
-            "diagnosis": {
-                "primary_issue": diagnosis.primary_issue,
-                "severity": diagnosis.severity,
-                "severity_score": diagnosis.severity_score,
-                "vic_responsibility": diagnosis.vic_responsibility,
-                "routing_responsibility": diagnosis.routing_responsibility,
-                "upstream_responsibility": diagnosis.upstream_responsibility,
-                "reasoning": diagnosis.reasoning,
-                "improvement_trend": diagnosis.improvement_trend,
-                "recommendations": diagnosis.recommendations,
-            },
+            "diagnosis": diag_dict,
             "current_metrics": {
                 "NSE": metrics.get("NSE"),
                 "PBIAS": metrics.get("PBIAS"),

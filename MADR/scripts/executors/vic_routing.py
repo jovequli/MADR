@@ -1,8 +1,8 @@
 """VIC + Lohmann routing executor.
 
-This is the original MADR pipeline wrapped behind the ``ModelExecutor`` ABC.
+This is the original MADR.cli pipeline wrapped behind the ``ModelExecutor`` ABC.
 It delegates straight to ``scripts/vic_executor.py`` for the actual VIC and
-routing calls — no behavioural change versus the pre-refactor workflow.
+routing calls — no behavioural change versus pre-refactor MADR.cli.
 
 The intermediate-flux caching that used to live in
 ``graph_nodes._cache_vic_fluxes_for_routing`` moves here so it stays close
@@ -24,7 +24,7 @@ from . import ModelExecutor
 
 
 class VICRoutingExecutor(ModelExecutor):
-    """VIC + Lohmann routing as a swappable model-execution unit."""
+    """VIC + Lohmann routing: today's MADR.cli behaviour as a swappable unit."""
 
     def __init__(self, mode: str = "simulate"):
         self._vic = VICExecutor(mode=mode)

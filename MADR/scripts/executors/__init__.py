@@ -1,4 +1,4 @@
-"""Pluggable model-execution layer for MADR.
+"""Pluggable model-execution layer for MADR.cli.
 
 A `ModelExecutor` runs one model combination's full per-candidate evaluation
 pipeline: take parameters in, run the model(s), return metrics. Concrete
@@ -6,7 +6,6 @@ combinations live in sibling modules:
 
     vic_routing       -> VICRoutingExecutor      (VIC + Lohmann routing)
     vic_cama_flood    -> VICCamaFloodExecutor    (VIC + CaMa-Flood)
-    swat              -> SWATExecutor            (SWAT+ integrated routing)
 
 Call `make_executor(combination, ...)` to get the right one for the run.
 """
@@ -138,9 +137,12 @@ def make_executor(combination: str, *, mode: str = "simulate", **kwargs) -> Mode
     if name == "swat":
         from .swat import SWATExecutor
         return SWATExecutor(mode=mode, **kwargs)
+    if name == "wflow":
+        from .wflow import WflowExecutor
+        return WflowExecutor(mode=mode, **kwargs)
     raise ValueError(
         f"Unknown model_combination {name!r}. "
-        f"Known: 'vic_routing', 'vic_cama_flood', 'swat'."
+        f"Known: 'vic_routing', 'vic_cama_flood', 'swat', 'wflow'."
     )
 
 

@@ -1,12 +1,12 @@
 Round {round_id} | J={j_total:.5f} | outlet_NSE={outlet_nse:.4f} | mean_NSE={mean_sub_nse:.4f}
 
 Model: SWAT+ with integrated routing. Calibration is via calibration.cal
-with change-types absval/abschg/pctchg. The 13 core tunable params are:
-cn2, esco, awc, surlag, lat_ttime, canmx, epco, perco, alpha,
-revap_co, revap_min, flo_min, deep_seep.
-Plus 5 snow params for Tangnaihai:
-snofall_tmp, snomelt_tmp, snomelt_max, snomelt_min, snomelt_lag.
-NOTE: `gw_delay` and `alpha_bf` are DEAD names in SWAT+ — do NOT propose them.
+with change-types absval/abschg/pctchg. The 19 tunable params are:
+cn2, esco, epco, perco, petco, cn3_swf, ovn, lat_ttime, canmx,
+awc, k, alpha, revap_co, revap_min, flo_min, deep_seep, bf_max,
+surlag, chn.
+pctchg params: cn2, awc, k, ovn, chn, bf_max (the rest are absval).
+NOTE: `gw_delay`, `alpha_bf`, and the 5 snow params are DEAD names here — do NOT propose them.
 
 {worker_results_block}
 

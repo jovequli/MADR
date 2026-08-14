@@ -359,7 +359,7 @@ def _attribute_responsibility(
         up /= total
 
     # swat: 无独立routing模块，不划分陆面/routing责任(见docstring)
-    if model_combination == "swat":
+    if model_combination in ("swat", "wflow"):
         return float("nan"), float("nan"), round(up, 2)
 
     return round(vic, 2), round(rout, 2), round(up, 2)
@@ -376,9 +376,11 @@ def _generate_reasoning(
     model_combination: str = "vic_routing",
 ) -> str:
     # 按模型组合调整措辞(vic_routing措辞与原版逐字一致)
-    land = "SWAT+" if model_combination == "swat" else "VIC"
+    land = "SWAT+" if model_combination == "swat" else ("wflow_sbm" if model_combination == "wflow" else "VIC")
     if model_combination == "swat":
         too_fast, too_slow = "surface lag too short", "surface lag too long"
+    elif model_combination == "wflow":
+        too_fast, too_slow = "kinematic wave too fast (N too low)", "kinematic wave too slow (N too high)"
     elif model_combination == "vic_cama_flood":
         too_fast, too_slow = "channel wave too fast", "channel wave too slow"
     else:
@@ -437,6 +439,12 @@ def _generate_reasoning(
                 f"Combined issue: multiple signatures off (SWAT+ integrated model, no land/routing split). "
                 f"PBIAS={pbias_str}, peak_timing={timing_str}."
             )
+        if model_combination == "wflow":
+            # wflow_sbm一体化模型(SBM土壤 + kinematic-wave汇流)无VIC/routing责任划分
+            return (
+                f"Combined issue: multiple signatures off (wflow_sbm integrated SBM+kinematic-wave model, no land/routing split). "
+                f"PBIAS={pbias_str}, peak_timing={timing_str}."
+            )
         return (
             f"Combined issue: VIC resp.={vic_resp:.0%}, Routing resp.={routing_resp:.0%}. "
             f"PBIAS={pbias_str}, peak_timing={timing_str}."
@@ -446,6 +454,100 @@ def _generate_reasoning(
 # ============================================================================
 # Step 5: 生成建议
 # ============================================================================
+
+def _wflow_recommendations(
+    pbias: float, peak_ratio: float, lowflow_ratio: float,
+    peak_timing: float, recession_k: float, baseflow_bias: float,
+    peak_mag_bias: float,
+    current_params: Optional[Dict[str, Any]] = None,
+) -> List[Dict]:
+    """wflow_sbm parameter rules (integrated SBM soil + kinematic-wave routing).
+
+    Signatures map to wflow params in the layered order: KsatHorFrac / KsatVer
+    set baseflow volume, f + SoilThickness set the recession / low-flow, N +
+    N_River set peak magnitude & timing. Manning N must NOT compensate for
+    runoff / groundwater errors -- fix volume and baseflow with the soil
+    parameters first; adjust N / N_River only for shape and timing.
+    KsatHorFrac and KsatVer are log-sampled.
+    """
+    recs: List[Dict] = []
+
+    if peak_ratio > 1.05:
+        mag = "large" if peak_ratio > 1.2 else "medium" if peak_ratio > 1.1 else "small"
+        recs.append({"param": "N", "direction": "increase", "magnitude": mag,
+            "confidence": min(0.9, 0.4 + abs(peak_ratio - 1.0)),
+            "reason": f"peak_ratio={peak_ratio:.2f}>1.05, increase land Manning N to attenuate the flood peak",
+            "category": "wflow"})
+
+    if peak_ratio < 0.95:
+        mag = "large" if peak_ratio < 0.8 else "medium" if peak_ratio < 0.9 else "small"
+        recs.append({"param": "N", "direction": "decrease", "magnitude": mag,
+            "confidence": min(0.9, 0.4 + abs(peak_ratio - 1.0)),
+            "reason": f"peak_ratio={peak_ratio:.2f}<0.95, decrease land Manning N to sharpen the peak (only once volume is right)",
+            "category": "wflow"})
+
+    if lowflow_ratio < 0.9 or (not math.isnan(baseflow_bias) and baseflow_bias < -20):
+        recs.append({"param": "KsatHorFrac", "direction": "increase", "magnitude": "medium",
+            "confidence": 0.75,
+            "reason": f"lowflow_ratio={lowflow_ratio:.2f}, increase KsatHorFrac (log) to route more lateral subsurface flow to the stream",
+            "category": "wflow"})
+        recs.append({"param": "SoilThickness", "direction": "increase", "magnitude": "small",
+            "confidence": 0.6,
+            "reason": "low flows too weak, increase SoilThickness to add storage that sustains dry-season baseflow",
+            "category": "wflow"})
+
+    if lowflow_ratio > 1.1:
+        recs.append({"param": "KsatHorFrac", "direction": "decrease", "magnitude": "medium",
+            "confidence": 0.7,
+            "reason": f"lowflow_ratio={lowflow_ratio:.2f}>1.1, decrease KsatHorFrac (log) to reduce excess baseflow",
+            "category": "wflow"})
+
+    if pbias > 10.0:
+        recs.append({"param": "SoilThickness", "direction": "increase", "magnitude": "medium",
+            "confidence": 0.65,
+            "reason": f"PBIAS={pbias:.1f}% too wet, increase SoilThickness so more water is stored/evaporated instead of running off",
+            "category": "wflow"})
+
+    if pbias < -10.0:
+        recs.append({"param": "KsatVer", "direction": "increase", "magnitude": "medium",
+            "confidence": 0.65,
+            "reason": f"PBIAS={pbias:.1f}% too dry, increase KsatVer (log) so more precip becomes subsurface flow instead of ET loss",
+            "category": "wflow"})
+        recs.append({"param": "SoilThickness", "direction": "decrease", "magnitude": "small",
+            "confidence": 0.5,
+            "reason": "too dry, decrease SoilThickness to cut ET storage and release more water to streamflow",
+            "category": "wflow"})
+
+    if not math.isnan(recession_k) and recession_k > 1.3:
+        recs.append({"param": "f", "direction": "decrease", "magnitude": "medium",
+            "confidence": 0.7,
+            "reason": f"recession k_ratio={recession_k:.2f}>1.3 too fast, decrease f so KsatVer decays more slowly with depth and the recession lengthens",
+            "category": "wflow"})
+        recs.append({"param": "SoilThickness", "direction": "increase", "magnitude": "small",
+            "confidence": 0.55,
+            "reason": "recession too fast, increase SoilThickness for more storage to sustain the recession",
+            "category": "wflow"})
+
+    if not math.isnan(recession_k) and recession_k < 0.7:
+        recs.append({"param": "f", "direction": "increase", "magnitude": "medium",
+            "confidence": 0.7,
+            "reason": f"recession k_ratio={recession_k:.2f}<0.7 too slow, increase f so KsatVer decays faster with depth and the recession sharpens",
+            "category": "wflow"})
+
+    if not math.isnan(peak_timing):
+        if peak_timing < -0.5:
+            recs.append({"param": "N_River", "direction": "increase", "magnitude": "small",
+                "confidence": 0.55,
+                "reason": f"peak {peak_timing:.1f}d too early, increase river Manning N_River to slow the channel wave",
+                "category": "wflow"})
+        elif peak_timing > 0.5:
+            recs.append({"param": "N_River", "direction": "decrease", "magnitude": "small",
+                "confidence": 0.55,
+                "reason": f"peak {peak_timing:.1f}d too late, decrease river Manning N_River to speed the channel wave",
+                "category": "wflow"})
+
+    return recs
+
 
 def _generate_recommendations(
     primary_issue: str, pbias: float, peak_ratio: float,
@@ -470,6 +572,11 @@ def _generate_recommendations(
     """
     if model_combination == "swat":
         recs = _swat_recommendations(
+            pbias, peak_ratio, lowflow_ratio, peak_timing,
+            recession_k, baseflow_bias, peak_mag_bias, current_params
+        )
+    elif model_combination == "wflow":
+        recs = _wflow_recommendations(
             pbias, peak_ratio, lowflow_ratio, peak_timing,
             recession_k, baseflow_bias, peak_mag_bias, current_params
         )

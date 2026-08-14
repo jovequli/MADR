@@ -19,6 +19,7 @@ Usage:
 """
 
 import logging
+import math
 import random
 import time
 from typing import Dict, List, Any, Optional, Tuple
@@ -36,11 +37,17 @@ def _generate_near_samples(
     active_keys: List[str],
     n_samples: int,
     spread: float = 0.15,
+    log_params: Optional[List[str]] = None,
 ) -> List[Dict[str, float]]:
     """Generate samples near the default center with Gaussian perturbation.
 
     spread: fraction of parameter range used as std-dev.
+
+    log_params (optional): keys sampled in LOG space (geometric perturbation
+    about the center, std-dev = spread * log10(hi/lo) decades). Defaults to
+    None -> no log keys, so existing (VIC/SWAT) callers are byte-identical.
     """
+    log_set = set(log_params or [])
     samples = []
     for _ in range(n_samples):
         s = dict(center)
@@ -48,8 +55,14 @@ def _generate_near_samples(
             if k not in param_ranges:
                 continue
             lo, hi = param_ranges[k]
-            std = (hi - lo) * spread
-            new_val = center[k] + random.gauss(0, std)
+            if k in log_set and lo > 0 and hi > 0:
+                c = center.get(k, math.sqrt(lo * hi))
+                c = min(max(c, lo), hi)
+                std_dec = spread * (math.log10(hi) - math.log10(lo))
+                new_val = 10 ** (math.log10(c) + random.gauss(0, std_dec))
+            else:
+                std = (hi - lo) * spread
+                new_val = center[k] + random.gauss(0, std)
             s[k] = max(lo, min(hi, new_val))
         samples.append(s)
     return samples
@@ -60,13 +73,23 @@ def _generate_random_samples(
     active_keys: List[str],
     base_params: Dict[str, float],
     n_samples: int,
+    log_params: Optional[List[str]] = None,
 ) -> List[Dict[str, float]]:
     """Generate Latin-Hypercube-like uniform random samples.
 
     For simplicity we use stratified random (divide each dim into n_samples
     strata) when n_samples <= 30, otherwise pure uniform.
     Non-active keys are kept at base_params values.
+
+    log_params (optional): keys drawn LOG-uniformly across [lo, hi] (strata
+    edges on log10 axis). Defaults to None -> no log keys, so existing
+    (VIC/SWAT) callers are byte-identical.
     """
+    log_set = set(log_params or [])
+
+    def _is_log(k, lo, hi):
+        return k in log_set and lo > 0 and hi > 0
+
     samples = []
     if n_samples <= 50:
         # Stratified random per dimension
@@ -75,8 +98,13 @@ def _generate_random_samples(
             if k not in param_ranges:
                 continue
             lo, hi = param_ranges[k]
-            edges = np.linspace(lo, hi, n_samples + 1)
-            vals = [random.uniform(edges[i], edges[i + 1]) for i in range(n_samples)]
+            if _is_log(k, lo, hi):
+                edges = np.logspace(np.log10(lo), np.log10(hi), n_samples + 1)
+                vals = [10 ** random.uniform(np.log10(edges[i]), np.log10(edges[i + 1]))
+                        for i in range(n_samples)]
+            else:
+                edges = np.linspace(lo, hi, n_samples + 1)
+                vals = [random.uniform(edges[i], edges[i + 1]) for i in range(n_samples)]
             random.shuffle(vals)
             strata[k] = vals
 
@@ -93,7 +121,10 @@ def _generate_random_samples(
                 if k not in param_ranges:
                     continue
                 lo, hi = param_ranges[k]
-                s[k] = random.uniform(lo, hi)
+                if _is_log(k, lo, hi):
+                    s[k] = 10 ** random.uniform(np.log10(lo), np.log10(hi))
+                else:
+                    s[k] = random.uniform(lo, hi)
             samples.append(s)
     return samples
 
@@ -101,7 +132,7 @@ def _generate_random_samples(
 def run_initial_exploration(
     orchestrator,
     n_near: int = 10,
-    n_random: int = 40,
+    n_random: int = 20,
     vic_only_keys: Optional[List[str]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Run initial exploration for all basins.
@@ -182,7 +213,7 @@ def run_initial_exploration(
                     "metrics": metrics if ok else {},
                     "nse": nse,
                     "ok": ok,
-                    "label": "near" if i < n_near else "random",
+                    "label": "default" if i == 0 else ("near" if i <= n_near else "random"),
                 })
 
             # Sort by NSE descending

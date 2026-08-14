@@ -25,6 +25,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from .streamflow_metrics import compute_all_metrics  # shared metric math
+
 
 # ---------------------------------------------------------------------------
 # Batched per-worker spec (used by run_once_batched)
@@ -48,6 +50,7 @@ class WorkerSpec:
     obs_file: str
     start_date: str = "1980-01-01"
     end_date: str = "1990-12-31"
+    channel_id: int = 0   # >0 => score on routed channel flo_out (gis_id) not HRU water yield
 
 logger = logging.getLogger(__name__)
 
@@ -56,28 +59,40 @@ logger = logging.getLogger(__name__)
 # calibration.cal writer
 # ---------------------------------------------------------------------------
 
-# Object-type assignment per s6_generate_calibration_file.py.
-# SWAT+ reads obj_typ from calibration.cal to route the change to the
-# correct module (hru, bsn, aqu).
+# Object-type assignment mirrors cal_parms.cal's obj_typ column. The runner
+# uses it to SCOPE each change: hru/sol -> row lists HRU ids; aqu -> row lists
+# aquifer ids; bsn/rte -> one GLOBAL row (obj_tot=0, applies to all objects of
+# that native type). SWAT+ itself reads the true obj_typ from cal_parms.cal by
+# name, so a 'sol' param scoped by HRU id modifies that HRU's soil profile, and
+# a 'rte' global row modifies all channels.
 _OBJ_TYP = {
+    # HRU-scoped (object ids = HRU numbers)
     "cn2":         "hru",
     "esco":        "hru",
     "epco":        "hru",
-    "awc":         "hru",
     "perco":       "hru",
+    "petco":       "hru",
+    "cn3_swf":     "hru",
+    "ovn":         "hru",
     "lat_ttime":   "hru",
     "canmx":       "hru",
-    "surlag":      "bsn",
+    # SNOW (hru; re-added from v2/reference for cold-basin SWAT+)
+    "snofall_tmp": "hru", "snomelt_tmp": "hru", "snomelt_max": "hru",
+    "snomelt_min": "hru", "snomelt_lag": "hru",
+    # SOL (soil) — one soil profile per HRU, scoped by HRU id like hru
+    "awc":         "sol",
+    "k":           "sol",
+    # AQU (aquifer) — scoped by aquifer id
     "alpha":       "aqu",   # was alpha_bf in v1 — cal_parms.cal uses 'alpha'.
     "revap_co":    "aqu",
     "revap_min":   "aqu",
     "flo_min":     "aqu",
     "deep_seep":   "aqu",
-    "snofall_tmp": "hru",
-    "snomelt_tmp": "hru",
-    "snomelt_max": "hru",
-    "snomelt_min": "hru",
-    "snomelt_lag": "hru",
+    "bf_max":      "aqu",
+    # BSN (basin-wide) — single global row
+    "surlag":      "bsn",
+    # RTE (channel) — single global row over all channels
+    "chn":         "rte",
 }
 
 
@@ -172,6 +187,48 @@ def write_calibration_cal(
 # Batched calibration.cal writer (one row per (gauge, param) with HRU selector)
 # ---------------------------------------------------------------------------
 
+def _hru_to_aquifer_map(txtinout_dir: Path) -> Dict[int, int]:
+    """Map SWAT+ HRU obj_id -> aquifer id (aquifers are 1:1 with routing units).
+
+    Reads ``rout_unit.ele`` (element_id -> hru obj_id) and ``rout_unit.def``
+    (routing unit -> element ids; a NEGATIVE token means a contiguous range
+    from the previous element+1 through abs(token)). Returns {} if the files
+    are missing or unparseable so callers can fall back to basin-wide rows.
+    """
+    txt = Path(txtinout_dir)
+    ele_p, def_p = txt / "rout_unit.ele", txt / "rout_unit.def"
+    if not ele_p.exists() or not def_p.exists():
+        return {}
+    try:
+        elem_to_hru: Dict[int, int] = {}
+        for ln in ele_p.read_text().splitlines()[2:]:
+            f = ln.split()
+            if len(f) >= 4 and f[2] == "hru":
+                elem_to_hru[int(f[0])] = int(f[3])
+        hru_to_aqu: Dict[int, int] = {}
+        for ln in def_p.read_text().splitlines()[2:]:
+            f = ln.split()
+            if len(f) < 3:
+                continue
+            rtu = int(f[0])
+            elems: List[int] = []
+            last: Optional[int] = None
+            for tok in (int(x) for x in f[3:]):
+                if tok >= 0:
+                    elems.append(tok); last = tok
+                else:
+                    start = (last + 1) if last is not None else 1
+                    elems.extend(range(start, abs(tok) + 1)); last = abs(tok)
+            for e in elems:
+                h = elem_to_hru.get(e)
+                if h is not None:
+                    hru_to_aqu[h] = rtu       # aquifer id == routing unit id
+        return hru_to_aqu
+    except Exception as exc:  # noqa: BLE001 - defensive: fall back to global
+        logger.warning("HRU->aquifer map failed (%s); aqu params fall back to basin-wide", exc)
+        return {}
+
+
 def write_calibration_cal_batched(
     txtinout_dir: Path,
     per_worker_blocks: List[Tuple[str, Dict[str, float], List[int], Dict[str, str]]],
@@ -213,9 +270,11 @@ def write_calibration_cal_batched(
     # Object-type routing rules (see _OBJ_TYP near the top of this module
     # and the SWAT+ source cal_parmchg_read.f90 / cal_parm_select.f90):
     #
-    #   * HRU-typed params (cn2/esco/awc/...): one row per worker block,
-    #     with the worker's exclusive HRU unit IDs listed after obj_tot=n.
-    #   * bsn-typed params (surlag):           one GLOBAL row (obj_tot=0).
+    #   * HRU/SOL-typed params (cn2/esco/awc/k/...): one row per worker
+    #     block, with the worker's exclusive HRU unit IDs after obj_tot=n.
+    #     (sol params awc/k have one soil profile per HRU, so the HRU id
+    #     selects the soil to modify.)
+    #   * bsn/rte-typed params (surlag/chn):   one GLOBAL row (obj_tot=0).
     #     The outermost (outlet) worker's value is used because SWAT+ would
     #     overwrite the basin-wide scalar with the last value anyway.
     #   * aqu-typed params (alpha_bf/gw_delay/revap_co/flo_min): one
@@ -235,7 +294,7 @@ def write_calibration_cal_batched(
         n_hru = len(hrus)
         for name, value in params.items():
             obj_typ = _OBJ_TYP.get(name, "hru")
-            if obj_typ != "hru":
+            if obj_typ not in ("hru", "sol"):
                 continue
             ctype = change_types.get(name, "absval")
             row = (
@@ -245,28 +304,70 @@ def write_calibration_cal_batched(
             )
             body_rows.append(row)
 
-    # Second pass: bsn/aqu (global) rows, taken from the FIRST worker in
-    # per_worker_blocks (apply_order[0] = outlet). Non-HRU params can only
-    # have one value basin-wide, so per-worker values are not meaningful;
-    # using the outlet's value is the natural default.
-    global_params: Dict[str, Tuple[float, str]] = {}
+    # Second pass (bsn): TRUE basin-wide params (surlag) — a single global
+    # row from the outlet worker; there is only one basin object so per-worker
+    # values are not meaningful.
     if per_worker_blocks:
         _outlet_sid, outlet_params, _h, outlet_ct = per_worker_blocks[0]
         for name, value in outlet_params.items():
-            obj_typ = _OBJ_TYP.get(name, "hru")
-            if obj_typ == "hru":
+            if _OBJ_TYP.get(name, "hru") not in ("bsn", "rte"):
                 continue
             ctype = outlet_ct.get(name, "absval")
-            global_params[name] = (value, ctype)
-    for name, (value, ctype) in global_params.items():
-        # obj_tot = 0 → SWAT+ applies to all elements of that obj_typ
-        # (1 for bsn, sp_ob%aqu for aqu — possibly zero, which is a no-op).
-        row = (
-            f"  {name:<14s} {ctype:<11s} {value:<12.4f} "
-            f"{'0':>9s} {'0':>9s} {'0':>9s} {'0':>9s} {'0':>9s} {'0':>9s} {'0':>9s} "
-            f"{'0':>9s}"
-        )
-        body_rows.append(row)
+            row = (
+                f"  {name:<14s} {ctype:<11s} {value:<12.4f} "
+                f"{'0':>9s} {'0':>9s} {'0':>9s} {'0':>9s} {'0':>9s} {'0':>9s} {'0':>9s} "
+                f"{'0':>9s}"
+            )
+            body_rows.append(row)
+
+    # Third pass (aqu): per-worker aquifer scoping so downstream proposals are
+    # honoured AND upstream aquifer params stay locked. Aquifers are 1:1 with
+    # routing units; map each worker's EXCLUSIVE HRUs -> aquifer ids, then make
+    # the aquifer sets exclusive too (inner keeps its aquifers, subtracted from
+    # outer) so each aquifer is written exactly once. Fall back to a single
+    # basin-wide row (outlet value) if the HRU->aquifer map is unavailable.
+    hru_to_aqu = _hru_to_aquifer_map(txtinout_dir)
+    if hru_to_aqu:
+        aqu_by_block: List[set] = []
+        for _sid, _params, hrus, _ct in per_worker_blocks:
+            aqu_by_block.append({hru_to_aqu[int(h)] for h in (hrus or []) if int(h) in hru_to_aqu})
+        # exclusivity: walk inner->outer (per_worker_blocks is outer-first)
+        later_union: set = set()
+        excl_aqu: List[List[int]] = [[]] * len(per_worker_blocks)
+        for i in range(len(per_worker_blocks) - 1, -1, -1):
+            own = sorted(aqu_by_block[i] - later_union)
+            excl_aqu[i] = own
+            later_union |= aqu_by_block[i]
+        for (sid, params, _hrus, change_types), aqu_ids in zip(per_worker_blocks, excl_aqu):
+            if not aqu_ids:
+                continue
+            aqu_strs = " ".join(str(a) for a in aqu_ids)
+            n_aqu = len(aqu_ids)
+            for name, value in params.items():
+                if _OBJ_TYP.get(name, "hru") != "aqu":
+                    continue
+                ctype = change_types.get(name, "absval")
+                row = (
+                    f"  {name:<14s} {ctype:<11s} {value:<12.4f} "
+                    f"{'0':>9s} {'0':>9s} {'0':>9s} {'0':>9s} {'0':>9s} {'0':>9s} {'0':>9s} "
+                    f"{n_aqu:>9d} {aqu_strs}"
+                )
+                body_rows.append(row)
+    else:
+        logger.warning("aqu params written basin-wide (no HRU->aquifer map); "
+                       "nested upstream aquifer lock not enforced")
+        if per_worker_blocks:
+            _outlet_sid, outlet_params, _h, outlet_ct = per_worker_blocks[0]
+            for name, value in outlet_params.items():
+                if _OBJ_TYP.get(name, "hru") != "aqu":
+                    continue
+                ctype = outlet_ct.get(name, "absval")
+                row = (
+                    f"  {name:<14s} {ctype:<11s} {value:<12.4f} "
+                    f"{'0':>9s} {'0':>9s} {'0':>9s} {'0':>9s} {'0':>9s} {'0':>9s} {'0':>9s} "
+                    f"{'0':>9s}"
+                )
+                body_rows.append(row)
 
     with cal_path.open("w") as f:
         f.write("calibration.cal: written by swatplus_runner.write_calibration_cal_batched\n")
@@ -420,9 +521,8 @@ def _make_working_txtinout(
 
 # Optional fallback cal_parms.cal location, taken from environment.
 # Set MADR_SWATPLUS_CAL_PARMS to an absolute path if you want the runner to
-# auto-copy a known-good cal_parms.cal into TxtInOut directories that lack
-# one. If unset, the runner expects the template to already contain
-# cal_parms.cal.
+# auto-copy a known-good cal_parms.cal into TxtInOut directories that lack one.
+# If unset, the runner expects the template to already contain cal_parms.cal.
 _FALLBACK_CAL_PARMS = (
     Path(os.environ["MADR_SWATPLUS_CAL_PARMS"])
     if os.environ.get("MADR_SWATPLUS_CAL_PARMS")
@@ -433,8 +533,7 @@ _FALLBACK_CAL_PARMS = (
 def ensure_calibration_enabled(txtinout_dir: Path) -> None:
     """Make sure SWAT+ will read calibration.cal.
 
-    - Copy cal_parms.cal into txtinout_dir if missing (from fallback when
-      MADR_SWATPLUS_CAL_PARMS is set).
+    - Copy cal_parms.cal into txtinout_dir if missing (from fallback).
     - Update the `chg` line in file.cio so SWAT+ reads cal_parms.cal +
       calibration.cal. The chg line columns are:
         chg  cal_parms.cal  calibration.cal  ...
@@ -442,7 +541,7 @@ def ensure_calibration_enabled(txtinout_dir: Path) -> None:
     cal_parms = txtinout_dir / "cal_parms.cal"
     if not cal_parms.exists() and _FALLBACK_CAL_PARMS and _FALLBACK_CAL_PARMS.exists():
         shutil.copy2(_FALLBACK_CAL_PARMS, cal_parms)
-        logger.info("Copied cal_parms.cal fallback (from MADR_SWATPLUS_CAL_PARMS) into %s", txtinout_dir)
+        logger.info("Copied cal_parms.cal fallback into %s", txtinout_dir)
 
     cio_path = txtinout_dir / "file.cio"
     if not cio_path.exists():
@@ -535,6 +634,52 @@ def _load_unit_to_area(subbasin_attrs_file: Path) -> Tuple[Dict[int, int], Dict[
     fid_to_unit = {h["FID"]: (i + 1) for i, h in enumerate(attrs)}
     unit_to_area = {(i + 1): float(h["area_km2"]) for i, h in enumerate(attrs)}
     return fid_to_unit, unit_to_area
+
+
+def parse_channel_sd_day(
+    chan_file: Path,
+    channel_id: int,
+    start_date: str = "",
+    end_date: str = "",
+) -> List[Tuple[str, float]]:
+    """Return [(date_str, Q_m3s)] of ROUTED channel discharge (flo_out) for one channel.
+
+    channel_sd_day.txt: line1 title, line2 header (jday mon day yr unit gis_id
+    name area ... flo_out), line3 units, lines4+ data. flo_out is m3/s (daily).
+    Matches rows on the gis_id column == *channel_id* (1:1 with subbasin id).
+    Used for large basins where channel routing matters; HRU water-yield sum
+    (parse_hru_wb_day) remains the fallback for headwater-scale templates.
+    """
+    if not chan_file.exists():
+        logger.warning("channel_sd_day.txt not found: %s", chan_file)
+        return []
+    lines = chan_file.read_text().strip().split("\n")
+    if len(lines) < 4:
+        return []
+    header = lines[1].split()
+    try:
+        yr_i = header.index("yr"); mon_i = header.index("mon"); day_i = header.index("day")
+        gid_i = header.index("gis_id"); flo_i = header.index("flo_out")
+    except ValueError as e:
+        logger.warning("channel_sd_day header missing column: %s", e)
+        return []
+    start = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+    end = datetime.strptime(end_date, "%Y-%m-%d") if end_date else None
+    out: List[Tuple[str, float]] = []
+    for ln in lines[3:]:
+        tok = ln.split()
+        if len(tok) <= flo_i:
+            continue
+        try:
+            if int(tok[gid_i]) != int(channel_id):
+                continue
+            dt = datetime(int(tok[yr_i]), int(tok[mon_i]), int(tok[day_i]))
+        except (ValueError, IndexError):
+            continue
+        if (start and dt < start) or (end and dt > end):
+            continue
+        out.append((dt.strftime("%Y-%m-%d"), float(tok[flo_i])))
+    return out
 
 
 def parse_hru_wb_day(
@@ -752,70 +897,8 @@ def _filter_metrics_window(
 # Performance metrics (NSE / KGE / PBIAS / RMSE / R2 / flow ratios)
 # ---------------------------------------------------------------------------
 
-def compute_ratio(sim: List[float], obs: List[float],
-                  top_frac: float = 0.05, low: bool = False) -> float:
-    """Mean sim/obs ratio over the top (or bottom) `top_frac` of obs values.
-
-    Mirrors vic_runner.compute_ratio so peak_ratio / lowflow_ratio are
-    comparable across model combinations. NaN when not computable.
-    """
-    if not sim or not obs:
-        return float("nan")
-    k = max(1, int(len(sim) * top_frac))
-    pairs = sorted(zip(sim, obs), key=lambda x: x[1], reverse=not low)[:k]
-    sim_mean = sum(p[0] for p in pairs) / len(pairs)
-    obs_mean = sum(p[1] for p in pairs) / len(pairs)
-    if obs_mean == 0:
-        return float("nan")
-    return sim_mean / obs_mean
 
 
-def compute_metrics(sim: List[float], obs: List[float]) -> Dict[str, float]:
-    n = len(sim)
-    if n == 0 or n != len(obs):
-        return {"NSE": float("nan"), "KGE": float("nan"), "PBIAS": float("nan"),
-                "RMSE": float("nan"), "R2": float("nan"),
-                "peak_ratio": float("nan"), "lowflow_ratio": float("nan")}
-
-    obs_mean = sum(obs) / n
-    sim_mean = sum(sim) / n
-
-    obs_var = sum((o - obs_mean) ** 2 for o in obs)
-    nse = 1 - sum((o - s) ** 2 for o, s in zip(obs, sim)) / obs_var if obs_var > 0 else float("nan")
-
-    # Framework-wide PBIAS convention: 100*sum(sim-obs)/sum(obs), positive = too wet (matches vic_runner).
-    pbias = 100 * sum(s - o for o, s in zip(obs, sim)) / sum(obs) if sum(obs) != 0 else float("nan")
-
-    rmse = math.sqrt(sum((o - s) ** 2 for o, s in zip(obs, sim)) / n)
-
-    sim_std = math.sqrt(sum((s - sim_mean) ** 2 for s in sim) / n)
-    obs_std = math.sqrt(sum((o - obs_mean) ** 2 for o in obs) / n)
-    if sim_std == 0 or obs_std == 0:
-        r = float("nan")
-    else:
-        r = sum((s - sim_mean) * (o - obs_mean) for s, o in zip(sim, obs)) / (n * sim_std * obs_std)
-
-    if obs_std == 0 or sim_std == 0 or obs_mean == 0 or sim_mean == 0 or math.isnan(r):
-        kge = float("nan")
-    else:
-        beta = sim_mean / obs_mean
-        gamma = (sim_std / sim_mean) / (obs_std / obs_mean)
-        kge = 1 - math.sqrt((r - 1) ** 2 + (beta - 1) ** 2 + (gamma - 1) ** 2)
-
-    r2 = r * r if not math.isnan(r) else float("nan")
-
-    peak_ratio = compute_ratio(sim, obs, top_frac=0.05)
-    lowflow_ratio = compute_ratio(sim, obs, top_frac=0.20, low=True)
-
-    return {
-        "NSE": round(nse, 4) if not math.isnan(nse) else float("nan"),
-        "KGE": round(kge, 4) if not math.isnan(kge) else float("nan"),
-        "PBIAS": round(pbias, 2) if not math.isnan(pbias) else float("nan"),
-        "RMSE": round(rmse, 2),
-        "R2": round(r2, 4) if not math.isnan(r2) else float("nan"),
-        "peak_ratio": round(peak_ratio, 4) if not math.isnan(peak_ratio) else float("nan"),
-        "lowflow_ratio": round(lowflow_ratio, 4) if not math.isnan(lowflow_ratio) else float("nan"),
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -914,10 +997,17 @@ def run_once(
             shutil.rmtree(work_dir, ignore_errors=True)
         return False, {}
 
-    sim_pairs = parse_hru_wb_day(
-        hru_file, units_in_gauge, unit_to_area,
-        start_date=cfg.start_date, end_date=cfg.end_date,
-    )
+    _ch_id = int(getattr(cfg, "channel_id", 0) or 0)
+    if _ch_id > 0:
+        sim_pairs = parse_channel_sd_day(
+            hru_file.parent / "channel_sd_day.txt", _ch_id,
+            start_date=cfg.start_date, end_date=cfg.end_date,
+        )
+    else:
+        sim_pairs = parse_hru_wb_day(
+            hru_file, units_in_gauge, unit_to_area,
+            start_date=cfg.start_date, end_date=cfg.end_date,
+        )
     if not sim_pairs:
         logger.warning("No simulated Q parsed for %s (units %s)",
                        cfg.basin_name, units_in_gauge)
@@ -954,7 +1044,7 @@ def run_once(
     obs = [obs_by_date[d] for d in common]
 
     # 5. Metrics
-    metrics = compute_metrics(sim, obs)
+    metrics = compute_all_metrics(sim, obs, common)
     metrics["n_days"] = len(common)
 
     # 6. Persist daily discharge time series (full simulation period, obs
@@ -1200,10 +1290,17 @@ def run_once_batched(
             sim_by_sid[spec.subbasin_id] = {}
             obs_by_sid[spec.subbasin_id] = {}
             continue
-        sim_pairs = parse_hru_wb_day(
-            hru_file, units, unit_to_area,
-            start_date=spec.start_date, end_date=spec.end_date,
-        )
+        _ch_id = int(getattr(spec, "channel_id", 0) or 0)
+        if _ch_id > 0:
+            sim_pairs = parse_channel_sd_day(
+                hru_file.parent / "channel_sd_day.txt", _ch_id,
+                start_date=spec.start_date, end_date=spec.end_date,
+            )
+        else:
+            sim_pairs = parse_hru_wb_day(
+                hru_file, units, unit_to_area,
+                start_date=spec.start_date, end_date=spec.end_date,
+            )
         sim_by_date = dict(sim_pairs)
         try:
             obs_by_date = parse_obs_file(Path(spec.obs_file)) if spec.obs_file else {}
@@ -1223,7 +1320,7 @@ def run_once_batched(
         else:
             sim = [sim_for_metrics[d] for d in common]
             obs = [obs_by_date[d] for d in common]
-            m = compute_metrics(sim, obs)
+            m = compute_all_metrics(sim, obs, common)
             m["n_days"] = len(common)
             metrics_by_sid[spec.subbasin_id] = m
 
@@ -1259,4 +1356,8 @@ def _batched_nan_metrics() -> Dict[str, float]:
         "R2": float("nan"),
         "peak_ratio": float("nan"),
         "lowflow_ratio": float("nan"),
+        "peak_timing_bias_days": float("nan"),
+        "peak_magnitude_bias_pct": float("nan"),
+        "recession_k_ratio": float("nan"),
+        "baseflow_index_bias_pct": float("nan"),
     }

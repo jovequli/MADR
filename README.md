@@ -1,19 +1,37 @@
 # MADR — Multi-Agent Diagnostic Reasoning for Distributed Hydrological Model Calibration
 
-MADR is an LLM-driven framework that calibrates distributed hydrological models in nested-basin systems. A **Leader Agent** synthesizes cross-station simulation errors into structured per-basin guidance; **Worker Agents** translate that guidance into concrete parameter sets. The framework is implemented in [LangGraph](https://github.com/langchain-ai/langgraph) and treats both the hydrological model and the LLM API as pluggable components. Three hydrological-model combinations and several tested API adapters are included.
+MADR is an LLM-driven framework that calibrates distributed hydrological models in nested-basin systems. A **Leader Agent** synthesizes cross-station simulation errors into structured per-basin guidance; **Worker Agents** translate that guidance into concrete parameter sets. The framework is implemented in [LangGraph](https://github.com/langchain-ai/langgraph) and treats both the hydrological model and the LLM API as pluggable components. Four hydrological-model combinations and several tested LLM adapters — usable over both **API and local CLI** — are included.
 
 In the paper, MADR approaches the calibration accuracy of two benchmark optimization algorithms (SCE-UA, NSGA-III) at less than 5% of their evaluation budget across five nested gauging stations of the Huai River basin, and Worker-level LLM reasoning consistently outperforms a deterministic rule-based executor across both Gemini and Claude.
 
 📦 **Preprint**: Zhao, Li, Zhu, Jin, Zhang (2026). *LLM-Driven Diagnostic Reasoning for Distributed Hydrological Model Calibration*. Research Square. [10.21203/rs.3.rs-10106384/v1](https://doi.org/10.21203/rs.3.rs-10106384/v1)
 📂 **Dataset**: observations, model inputs, all calibration runs, and benchmark outputs on Zenodo. [10.5281/zenodo.20622937](https://doi.org/10.5281/zenodo.20622937)
 
-> **Version note.** The initial public code release associated with the Version 1 preprint is preserved under tag [`v0.1.0`](https://github.com/jovequli/MADR/tree/v0.1.0). Release [`v0.2.0`](https://github.com/jovequli/MADR/tree/v0.2.0) introduced the first correctness and robustness update. Release [`v0.2.1`](https://github.com/jovequli/MADR/tree/v0.2.1) synchronizes the public run instructions, formal example pipelines, dependency installation, and round-budget semantics.
+> **Version note.** The initial public code release associated with the Version 1 preprint is preserved under tag [`v0.1.0`](https://github.com/jovequli/MADR/tree/v0.1.0). Release [`v0.2.0`](https://github.com/jovequli/MADR/tree/v0.2.0) introduced the first correctness and robustness update. Release [`v0.2.1`](https://github.com/jovequli/MADR/tree/v0.2.1) synchronizes the public run instructions, formal example pipelines, dependency installation, and round-budget semantics. Release **v0.3.0** (this integrated build) adds a fourth hydrological model (wflow), CLI access with no API key, and a reproducibility layer — see the Update section below.
+
+---
+
+## 🆕 Update — Release v0.3.0 (integrated build)
+
+This release consolidates the previously separate, individually validated modules into a single integrated build, adds a fourth hydrological model, and adds a reproducibility layer. The Lohmann `routing/` model and the `SADR/` ablation control are unchanged from the previous release.
+
+**New**
+
+- **WFlow (`wflow_sbm`) model combination** — a fourth model driven by the same Leader–Worker workflow (integrated land surface + kinematic-wave routing; 8 tunable parameters including snow). See the model table below.
+- **CLI access, no API key** — the Worker/Leader LLM socket now accepts local-CLI providers (`claude_cli`, `codex_cli`) alongside the API adapters, so a run can be driven entirely through an installed CLI command with no API key set. The framework is not tied to any model version: switching the LLM is a different CLI command or a different API key, nothing more.
+- **Reproducibility & run management** — every run now writes a provenance snapshot (exact config, prompt tree, code version, environment), a verbatim LLM-call log (`llm_calls.jsonl`), and a convergence plot; a tiered archiver compresses and prunes completed runs by regenerability. See the new section below.
+- **Cross-combination consistency** — a single shared streamflow-metrics module (identical NSE/KGE/PBIAS/signatures across all combinations); VIC monthly-observation support and an explicit evaluation window; SWAT+ object-type parameter routing (`hru`/`sol`/`aqu`/`bsn`/`rte`) with HRU→aquifer mapping and a literature-aligned parameter set.
+
+**Fixed**
+
+- **Per-candidate diagnostics are now saved on every iteration.** In multi-candidate rounds, each candidate's diagnostic reasoning is persisted to its own `worker_<basin>_c<k>_<strategy>_diagnostic.json`, so no diagnostic information is lost during the iteration.
+- **CLI usage is now supported.** Claude/Codex can be driven through the local CLI with no `ANTHROPIC_API_KEY` required.
 
 ## Repository contents
 
 | Folder | Purpose |
 |---|---|
-| **`MADR/`** | The framework. Three hydrological-model combinations and tested LLM API adapters behind a single LangGraph workflow. |
+| **`MADR/`** | The framework. Four hydrological-model combinations and tested LLM adapters (API and CLI) behind a single LangGraph workflow. |
 | **`SADR/`** | Single-Agent Diagnostic Reasoning ablation control — the Leader is retained, but the LLM-based Worker is replaced by a deterministic rule-based executor. Scope: VIC + Lohmann routing only. |
 | **`routing/`** | The Lohmann routing model Fortran source with this study's local modifications and a Makefile. Build with `cd routing && make`. |
 
@@ -93,7 +111,8 @@ MADR keeps the hydrological model and the LLM provider behind narrow, swappable 
 |---|---|---|---|---|
 | `vic_routing` (paper default) | [VIC 5.1](https://github.com/UW-Hydro/VIC) | Lohmann (Fortran source in [`routing/`](routing/)) | `VIC_ONLY → ROUTING_ONLY → JOINT` | 6 soil + 2 routing = 8 |
 | `vic_cama_flood` | [VIC 5.1](https://github.com/UW-Hydro/VIC) | [CaMa-Flood v4.20](https://github.com/global-hydrodynamics/CaMa-Flood_v4) | `VIC_ONLY → CAMA_FLOOD_ONLY → JOINT` | 6 soil + 4 channel = 10 |
-| `swat` | [SWAT+](https://swatplus.gitbook.io/docs) (integrated land + routing) | (built-in) | `SWATPLUS_HRU` | 18 (HRU + groundwater + snow) |
+| `swat` | [SWAT+](https://swatplus.gitbook.io/docs) (integrated land + routing) | (built-in) | `SWATPLUS_HRU` | 24 (HRU + soil + aquifer + basin + channel + snow) |
+| `wflow` | [wflow_sbm](https://github.com/Deltares/Wflow.jl) (integrated land + kinematic-wave routing) | (built-in) | `WFLOW_SBM` | 8 (soil/routing + snow: KsatHorFrac, KsatVer, f, SoilThickness, N, N_River, TT, Cfmax) |
 
 Adding a new combination is a four-step recipe: drop in `MADR/prompts/<combination>/` (six prompt files), implement `MADR/scripts/executors/<combination>.py` as a `ModelExecutor` subclass, register it in the factory at `MADR/scripts/executors/__init__.py`, and add a sample config under `MADR/configs/`. See `MADR/docs/architecture.md` for the design rationale.
 
@@ -123,6 +142,23 @@ Example — switch from Claude to Gemini in any config:
 ```
 
 For multi-agent (MADR) runs, repeat the same swap in every `workers[]` entry. For SADR (Leader-only ablation), only the `leader` block changes.
+
+**CLI adapters (no API key).** Besides the API adapters above, the same LLM socket accepts local-CLI providers: `"provider": "claude_cli"` drives the installed `claude` command (Claude Code CLI, authenticated through its own login — no `ANTHROPIC_API_KEY` needed), and `"provider": "codex_cli"` drives the `codex` command. Because this is simply "invoke a local CLI binary," the same no-key path works for any provider that ships a CLI — **Kimi** and **Qwen (Qianwen)** included — by pointing the provider at the corresponding command. This is the recommended path when you have a CLI subscription instead of an API key. Because the underlying model is whatever the CLI is logged into, switching LLMs here is only a matter of which CLI you run.
+
+> The example models named in the table above are illustrations captured at one point in time. Providers ship new models frequently, so set `model` to whatever current model you have access to (or select it through your CLI). MADR does not depend on any specific model version.
+
+---
+
+## Reproducibility & run management
+
+Every run writes, into its output directory, the artifacts needed to reproduce and audit it:
+
+- **`provenance/`** — a one-time snapshot at launch: the exact loaded config (content, not just the path) plus `argv`, the full prompt-template tree, the code version (git commit + clean/dirty, or `unknown` outside git), and the Python/platform/host/key-package environment.
+- **`llm_calls.jsonl`** — a verbatim, write-before-parse log of every LLM call (system + messages, raw response, finish reason, token usage, duration, caller identity), including truncation retries and failed attempts. Controlled by `MADR_LLM_LOG`, set automatically to `<output_root>/llm_calls.jsonl`; leave it unset to disable.
+- **`convergence.png`** — a per-run convergence plot (round vs NSE per station, with rejected multi-candidate points), rendered from Tier-A files so it also works on archived runs.
+- **Tiered archiver** — `python -m scripts.archive_run --run-dir <run>` (dry-run by default; add `--apply`) compresses day-scale routing outputs, deletes regenerable working directories and caches, and VACUUMs the checkpoint database, keeping the irreproducible evidence intact and emitting `SHA256SUMS` + `RETENTION.md`.
+
+None of these ever blocks or alters a calibration run; any failure degrades to a warning.
 
 ---
 
@@ -199,6 +235,8 @@ export ANTHROPIC_API_KEY="your-key"    # default in the shipped configs
 #     DASHSCOPE_API_KEY, or MINIMAX_API_KEY
 ```
 
+Or use the **CLI path** — no API key required. Set the config's `provider` to `claude_cli` (or `codex_cli`) and make sure the corresponding CLI (`claude` / `codex`) is installed and logged in.
+
 ### Configure model and data paths
 
 The shipped configs use generic `/path/to/...` placeholders. Replace them with paths to your own model installation and dataset before running. For SWAT+, set `MADR_SWATPLUS_CAL_PARMS` if `cal_parms.cal` must be copied into working `TxtInOut` directories that do not already contain it.
@@ -222,6 +260,11 @@ python -m scripts.run_langgraph \
 python -m scripts.run_langgraph \
     --team-config configs/swat_yellow.json \
     --output-root ./output/swat_yellow
+
+# WFlow (wflow_sbm)
+python -m scripts.run_langgraph \
+    --team-config configs/wflow_nested.json \
+    --output-root ./output/wflow_nested
 ```
 
 CLI options: `--team-config PATH`, `--output-root PATH`, `--result-repo PATH`, `--run-name NAME`, `--resume`, `--dry-run`, `--max-rounds N`, `--log-level LEVEL`, `--thread-id ID`.
@@ -243,6 +286,7 @@ The `MADR/configs/` folder ships four examples:
 | `vic_routing_bengbu.json` | `vic_routing` | Paper's Huai River 5-basin setup (Bengbu outlet) |
 | `vic_cama_flood_songhua.json` | `vic_cama_flood` | Songhua River nested pair (Jiangqiao → Jiamusi), full real-mode `VIC_ONLY → CAMA_FLOOD_ONLY → JOINT` pipeline |
 | `swat_yellow.json` | `swat` | Yellow River Tangnaihai → Lanzhou, real-mode 90-round `SWATPLUS_HRU` pipeline with watershed-level J_total selection |
+| `wflow_nested.json` | `wflow` | Nested wflow_sbm example, `WFLOW_SBM` pipeline |
 
 ---
 
@@ -258,9 +302,11 @@ The sibling `SADR/` folder contains the Single-Agent Diagnostic Reasoning ablati
 
 ## Roadmap
 
-The pluggable-executor architecture is built for incremental growth. Future work will verify and integrate **additional distributed hydrological models** as new combinations under the same framework, so the same Leader–Worker workflow can drive calibrations of land-surface, channel-routing, and coupled hydrological systems beyond the three combinations shipped today.
+The pluggable-executor architecture is built for incremental growth. The `wflow_sbm` combination added in v0.3.0 is the first such extension beyond the original three; future work will verify and integrate **further distributed hydrological models** as new combinations under the same framework, so the same Leader–Worker workflow can drive calibrations of land-surface, channel-routing, and coupled hydrological systems beyond the combinations shipped today.
 
 More broadly, the multi-agent diagnostic-reasoning pattern is well suited to other multi-objective optimization problems in the Earth and water sciences — reservoir operation, water-resource allocation, and broader Earth-system calibration tasks are natural next targets where the same Leader–Worker structure could replace scalar-objective optimization with diagnostic-signal-aware reasoning.
+
+In practice we expect to proceed in stages: first, apply MADR across **more LLMs and more basins** to characterize its generalizability on distributed hydrological models; then extend to adjacent **hydrology and water-resource optimization** problems; and ultimately, as a general diagnostic-reasoning approach to multi-objective optimization, to the **broader Earth sciences**. This release deliberately keeps its scope on distributed hydrological models — the wider directions above are outlook, not yet part of the shipped framework.
 
 ---
 

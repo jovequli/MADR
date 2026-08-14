@@ -34,13 +34,27 @@ CAMA_PARAM_KEYS = ["Hc", "Hmin", "Wc", "Wmin"]
 # SWAT+ calibration parameter keys (used by the swat combination).
 # Mirrors the list verified against cal_parms.cal in the SWAT+ port.
 SWAT_PARAM_KEYS = [
-    "cn2", "esco", "awc", "surlag", "lat_ttime", "canmx",
-    "epco", "perco", "alpha", "revap_co", "revap_min", "flo_min", "deep_seep",
+    # HRU
+    "cn2", "esco", "epco", "perco", "petco", "cn3_swf", "ovn", "lat_ttime", "canmx",
+    # SOL (soil)
+    "awc", "k",
+    # AQU (aquifer)
+    "alpha", "revap_co", "revap_min", "flo_min", "deep_seep", "bf_max",
+    # BSN (basin) / RTE (channel)
+    "surlag", "chn",
+    # SNOW (hru; re-added from v2/reference for cold-basin SWAT+, per the combine request)
     "snofall_tmp", "snomelt_tmp", "snomelt_max", "snomelt_min", "snomelt_lag",
 ]
 
+# wflow_sbm calibration parameter keys (used by the wflow combination).
+# Mirrors WFLOW_PARAM_KEYS in scripts/wflow_executor.py (the source of truth).
+WFLOW_PARAM_KEYS = [
+    "KsatHorFrac", "KsatVer", "f", "SoilThickness", "N", "N_River",
+    "TT", "Cfmax",
+]
+
 # Union of every parameter key known across model combinations.
-ALL_PARAM_KEYS = PARAM_KEYS + CAMA_PARAM_KEYS + SWAT_PARAM_KEYS
+ALL_PARAM_KEYS = PARAM_KEYS + CAMA_PARAM_KEYS + SWAT_PARAM_KEYS + WFLOW_PARAM_KEYS
 
 # Routing defaults (used when the routing slot is "frozen" in VIC_ONLY).
 ROUTING_DEFAULTS = {"velocity": 1.5, "diffusivity": 800.0}
@@ -59,6 +73,7 @@ class CalibrationPhase(str, Enum):
     ROUTING_ONLY = "ROUTING_ONLY"             # Lohmann routing (vic_routing combo)
     CAMA_FLOOD_ONLY = "CAMA_FLOOD_ONLY"       # CaMa-Flood routing (vic_cama_flood combo)
     SWATPLUS_HRU = "SWATPLUS_HRU"             # SWAT+ all-params (swat combo single-phase)
+    WFLOW_SBM = "WFLOW_SBM"                   # wflow_sbm all-params (wflow combo single-phase)
     JOINT = "JOINT"                           # All params tunable
 
 
@@ -71,6 +86,7 @@ COMBINATION_PARAM_KEYS: Dict[str, List[str]] = {
     "vic_routing":    list(PARAM_KEYS),
     "vic_cama_flood": list(SOIL_PARAM_KEYS) + list(CAMA_PARAM_KEYS),
     "swat":           list(SWAT_PARAM_KEYS),
+    "wflow":          list(WFLOW_PARAM_KEYS),
 }
 
 COMBINATION_TUNABLE_KEYS_BY_PHASE: Dict[str, Dict[str, List[str]]] = {
@@ -88,6 +104,11 @@ COMBINATION_TUNABLE_KEYS_BY_PHASE: Dict[str, Dict[str, List[str]]] = {
         "SWATPLUS_HRU":    list(SWAT_PARAM_KEYS),
         # JOINT alias kept for compatibility (see executors/swat.py).
         "JOINT":           list(SWAT_PARAM_KEYS),
+    },
+    "wflow": {
+        "WFLOW_SBM":       list(WFLOW_PARAM_KEYS),
+        # JOINT alias kept for compatibility (see executors/wflow.py).
+        "JOINT":           list(WFLOW_PARAM_KEYS),
     },
 }
 
@@ -128,8 +149,10 @@ def get_tunable_keys(
         return list(CAMA_PARAM_KEYS)
     elif phase == CalibrationPhase.SWATPLUS_HRU:
         return list(SWAT_PARAM_KEYS)
+    elif phase == CalibrationPhase.WFLOW_SBM:
+        return list(WFLOW_PARAM_KEYS)
     else:  # JOINT
-        return list(PARAM_KEYS) + list(CAMA_PARAM_KEYS) + list(SWAT_PARAM_KEYS)
+        return list(PARAM_KEYS) + list(CAMA_PARAM_KEYS) + list(SWAT_PARAM_KEYS) + list(WFLOW_PARAM_KEYS)
 
 
 def get_locked_keys(
@@ -153,6 +176,9 @@ def get_locked_keys(
         return list(SOIL_PARAM_KEYS) + list(ROUTING_PARAM_KEYS)
     elif phase == CalibrationPhase.SWATPLUS_HRU:
         # SWAT+ tunes its own param set; everything VIC/CaMa is locked.
+        return list(PARAM_KEYS) + list(CAMA_PARAM_KEYS)
+    elif phase == CalibrationPhase.WFLOW_SBM:
+        # wflow tunes its own param set; everything VIC/CaMa is locked.
         return list(PARAM_KEYS) + list(CAMA_PARAM_KEYS)
     else:  # JOINT
         return []
