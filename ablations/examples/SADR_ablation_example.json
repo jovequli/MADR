@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "settings_file": "../../MADR/configs/settings.json",
+  "team_config": "../../MADR/configs/SADR_90round.json",
+  "run_name": "SADR-E_sonnet_rep1",
+  "api_profile": "sonnet_cached",
+  "exploration": {
+    "mode": "fresh"
+  },
+  "ablation": {
+    "version": "madr-ablation-v1",
+    "arm": "SADR-E",
+    "budget_mode": "matched_reference"
+  }
+}

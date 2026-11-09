@@ -1,0 +1,39 @@
+{
+  "schema": "madr-ablation-spec-v2",
+  "id": "H1",
+  "title": "Long-budget calibration",
+  "category": "Budget and phase sensitivity",
+  "method": "MADR",
+  "runnable": true,
+  "baseline_reference": "../../MADR/configs/MADR_90round.json",
+  "intervention": "Double the baseline main candidate budget using 100/60/20 main-loop rounds and 20/10/0 MC rounds. Keep exploration at 50.",
+  "preserve_and_boundaries": "This changes search strength and its phase allocation; it is not an exact continuation of the baseline after round 90. Select parameters using calibration evidence only, then evaluate the frozen selected vector on validation data.",
+  "shared_execution": "Shared hydrological executor, evaluation period, legal ranges and precision, phase locks except where explicitly ablated, same-background acceptance, center-reference reuse, retry/fallback policy, final confirmation and measured usage accounting remain active.",
+  "default_budget_mode": "sensitivity_schedule",
+  "exploration_policy": "compatible_authenticated_50_evaluation_bundle_allowed",
+  "budget": {
+    "scope": "per_subbasin",
+    "initial_exploration": 50,
+    "main_loop_rounds": 180,
+    "single_candidate_rounds": 150,
+    "multi_candidate_rounds": 30,
+    "candidates_per_mc_round": 3,
+    "main_loop_evaluations": 240,
+    "base_total_evaluations": 290,
+    "phase_rounds": [
+      100,
+      60,
+      20
+    ],
+    "phase_mc_rounds": [
+      20,
+      10,
+      0
+    ],
+    "additional_center_rechecks": "reported_separately",
+    "fixed_flux_preparation": "reported_separately"
+  },
+  "activation": "Explicit ablations/run_ablation.py only; ordinary entry points remain unchanged.",
+  "implementation_id": "sensitivity_extended_budget",
+  "protocol_version": "madr-ablation-v1"
+}

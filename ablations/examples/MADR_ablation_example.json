@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "settings_file": "../../MADR/configs/settings.json",
+  "team_config": "../../MADR/configs/MADR_90round.json",
+  "run_name": "MADR_I3_sonnet_rep1",
+  "api_profile": "sonnet_cached",
+  "exploration": {
+    "mode": "fresh"
+  },
+  "ablation": {
+    "version": "madr-ablation-v1",
+    "arm": "I3",
+    "budget_mode": "matched_reference"
+  }
+}

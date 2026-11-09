@@ -1,0 +1,35 @@
+{
+  "schema": "madr-ablation-spec-v2",
+  "id": "P4",
+  "title": "MADR without multi-candidate search and phase separation",
+  "category": "Procedure",
+  "method": "MADR",
+  "runnable": true,
+  "baseline_reference": "../../MADR/configs/MADR_90round.json",
+  "intervention": "Combine the no-MC and no-phase interventions.",
+  "preserve_and_boundaries": "Combines the P2 and P3 interventions on the shared executor and agent framework, with an equal-budget single-candidate schedule.",
+  "shared_execution": "Shared hydrological executor, evaluation period, legal ranges and precision, phase locks except where explicitly ablated, same-background acceptance, center-reference reuse, retry/fallback policy, final confirmation and measured usage accounting remain active.",
+  "default_budget_mode": "matched_reference",
+  "exploration_policy": "compatible_authenticated_50_evaluation_bundle_allowed",
+  "budget": {
+    "scope": "per_subbasin",
+    "initial_exploration": 50,
+    "main_loop_rounds": 120,
+    "single_candidate_rounds": 120,
+    "multi_candidate_rounds": 0,
+    "candidates_per_mc_round": 0,
+    "main_loop_evaluations": 120,
+    "base_total_evaluations": 170,
+    "phase_rounds": [
+      120
+    ],
+    "phase_mc_rounds": [
+      0
+    ],
+    "additional_center_rechecks": "reported_separately",
+    "fixed_flux_preparation": "reported_separately"
+  },
+  "activation": "Explicit ablations/run_ablation.py only; ordinary entry points remain unchanged.",
+  "implementation_id": "C4_no_mc_no_phases",
+  "protocol_version": "madr-ablation-v1"
+}

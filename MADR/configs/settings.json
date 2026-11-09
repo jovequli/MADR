@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "binding_json": "/srv/madr/input_binding.json",
+  "work_root": "/srv/madr/runs",
+  "key_file": "/srv/madr-secrets/api.env",
+  "_comment": "Example Linux paths. Inputs and credentials are external; each run_name creates a separate work directory."
+}

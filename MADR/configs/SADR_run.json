@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "settings_file": "settings.json",
+  "team_config": "SADR_90round.json",
+  "run_name": "SADR_sonnet_90round",
+  "api_profile": "sonnet_cached",
+  "exploration": {
+    "mode": "fresh"
+  }
+}

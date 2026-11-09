@@ -1,0 +1,39 @@
+{
+  "schema": "madr-ablation-spec-v2",
+  "id": "P2",
+  "title": "MADR without multi-candidate search",
+  "category": "Procedure",
+  "method": "MADR",
+  "runnable": true,
+  "baseline_reference": "../../MADR/configs/MADR_90round.json",
+  "intervention": "Use one proposal per station search round instead of MC.",
+  "preserve_and_boundaries": "Both mc_rounds and mc_candidates are zero in every phase. The reference candidate-evaluation budget is matched by adjusting the round counts.",
+  "shared_execution": "Shared hydrological executor, evaluation period, legal ranges and precision, phase locks except where explicitly ablated, same-background acceptance, center-reference reuse, retry/fallback policy, final confirmation and measured usage accounting remain active.",
+  "default_budget_mode": "matched_reference",
+  "exploration_policy": "compatible_authenticated_50_evaluation_bundle_allowed",
+  "budget": {
+    "scope": "per_subbasin",
+    "initial_exploration": 50,
+    "main_loop_rounds": 120,
+    "single_candidate_rounds": 120,
+    "multi_candidate_rounds": 0,
+    "candidates_per_mc_round": 0,
+    "main_loop_evaluations": 120,
+    "base_total_evaluations": 170,
+    "phase_rounds": [
+      70,
+      40,
+      10
+    ],
+    "phase_mc_rounds": [
+      0,
+      0,
+      0
+    ],
+    "additional_center_rechecks": "reported_separately",
+    "fixed_flux_preparation": "reported_separately"
+  },
+  "activation": "Explicit ablations/run_ablation.py only; ordinary entry points remain unchanged.",
+  "implementation_id": "C2_no_multi_candidate",
+  "protocol_version": "madr-ablation-v1"
+}

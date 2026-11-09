@@ -1,0 +1,39 @@
+{
+  "schema": "madr-ablation-spec-v2",
+  "id": "H3",
+  "title": "Phase lengths 40/40/10",
+  "category": "Budget and phase sensitivity",
+  "method": "MADR",
+  "runnable": true,
+  "baseline_reference": "../../MADR/configs/MADR_90round.json",
+  "intervention": "Use VIC/routing/JOINT phase lengths of 40/40/10, retaining 10/5 MC rounds.",
+  "preserve_and_boundaries": "Keep 90 main-loop rounds, 120 main evaluations and 50 exploration samples. Move phase boundaries only; retain phase-specific parameter locks and prompts.",
+  "shared_execution": "Shared hydrological executor, evaluation period, legal ranges and precision, phase locks except where explicitly ablated, same-background acceptance, center-reference reuse, retry/fallback policy, final confirmation and measured usage accounting remain active.",
+  "default_budget_mode": "sensitivity_schedule",
+  "exploration_policy": "compatible_authenticated_50_evaluation_bundle_allowed",
+  "budget": {
+    "scope": "per_subbasin",
+    "initial_exploration": 50,
+    "main_loop_rounds": 90,
+    "single_candidate_rounds": 75,
+    "multi_candidate_rounds": 15,
+    "candidates_per_mc_round": 3,
+    "main_loop_evaluations": 120,
+    "base_total_evaluations": 170,
+    "phase_rounds": [
+      40,
+      40,
+      10
+    ],
+    "phase_mc_rounds": [
+      10,
+      5,
+      0
+    ],
+    "additional_center_rechecks": "reported_separately",
+    "fixed_flux_preparation": "reported_separately"
+  },
+  "activation": "Explicit ablations/run_ablation.py only; ordinary entry points remain unchanged.",
+  "protocol_version": "madr-ablation-v1",
+  "implementation_id": "sensitivity_phase40_40_10"
+}

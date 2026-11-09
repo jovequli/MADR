@@ -1,0 +1,112 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "reasoning"
+  ],
+  "properties": {
+    "vic": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "binfilt": {
+          "type": "number"
+        },
+        "Ds": {
+          "type": "number"
+        },
+        "Dsmax": {
+          "type": "number"
+        },
+        "Ws": {
+          "type": "number"
+        },
+        "soil_d2": {
+          "type": "number"
+        },
+        "soil_d3": {
+          "type": "number"
+        }
+      }
+    },
+    "routing": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "velocity": {
+          "type": "number"
+        },
+        "diffusivity": {
+          "type": "number"
+        }
+      }
+    },
+    "reasoning": {
+      "type": "string",
+      "x-nonblank": true
+    },
+    "round_id": {
+      "type": "integer",
+      "x-runtime-owned": true
+    },
+    "subbasin_id": {
+      "type": "string"
+    },
+    "trial": {
+      "description": "Optional explanatory annotation; omission/null or malformed content is audited but does not invalidate otherwise legal physical guidance. Never invent evidence. Preferred complete shape is documented in x-annotation-schema.",
+      "x-annotation-schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "evidence_refs",
+          "hypothesis",
+          "uncertainty",
+          "expected_response"
+        ],
+        "properties": {
+          "evidence_refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "hypothesis": {
+            "type": "string",
+            "x-nonblank": true
+          },
+          "uncertainty": {
+            "type": "string",
+            "x-nonblank": true
+          },
+          "expected_response": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "metric",
+                "direction"
+              ],
+              "properties": {
+                "metric": {
+                  "type": "string"
+                },
+                "direction": {
+                  "type": "string",
+                  "enum": [
+                    "increase",
+                    "decrease",
+                    "toward_zero",
+                    "toward_one",
+                    "stable",
+                    "unknown"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

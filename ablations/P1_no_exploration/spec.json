@@ -1,0 +1,39 @@
+{
+  "schema": "madr-ablation-spec-v2",
+  "id": "P1",
+  "title": "MADR without initial exploration",
+  "category": "Procedure",
+  "method": "MADR",
+  "runnable": true,
+  "baseline_reference": "../../MADR/configs/MADR_90round.json",
+  "intervention": "Skip initial exploration and provide no exploration summaries to either role.",
+  "preserve_and_boundaries": "The reference main-loop phases, MC slots, round count, initial center, final confirmation and recovery are unchanged. The exploration evaluations are not reallocated, and no exploration bundle or cached summary is accepted.",
+  "shared_execution": "Shared hydrological executor, evaluation period, legal ranges and precision, phase locks except where explicitly ablated, same-background acceptance, center-reference reuse, retry/fallback policy, final confirmation and measured usage accounting remain active.",
+  "default_budget_mode": "preserve_main_schedule",
+  "exploration_policy": "fresh_required",
+  "budget": {
+    "scope": "per_subbasin",
+    "initial_exploration": 0,
+    "main_loop_rounds": 90,
+    "single_candidate_rounds": 75,
+    "multi_candidate_rounds": 15,
+    "candidates_per_mc_round": 3,
+    "main_loop_evaluations": 120,
+    "base_total_evaluations": 120,
+    "phase_rounds": [
+      50,
+      30,
+      10
+    ],
+    "phase_mc_rounds": [
+      10,
+      5,
+      0
+    ],
+    "additional_center_rechecks": "reported_separately",
+    "fixed_flux_preparation": "reported_separately"
+  },
+  "activation": "Explicit ablations/run_ablation.py only; ordinary entry points remain unchanged.",
+  "implementation_id": "C1_no_exploration",
+  "protocol_version": "madr-ablation-v1"
+}

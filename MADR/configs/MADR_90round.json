@@ -1,0 +1,337 @@
+{
+  "run_name": "MADR_sonnet_90round",
+  "max_rounds": 90,
+  "max_parallel_workers": 1,
+  "simulation_period": {
+    "start_year": 1980,
+    "end_year": 1990
+  },
+  "initial_exploration": {
+    "enabled": true,
+    "n_near": 10,
+    "n_random": 40,
+    "mode": "fresh",
+    "seed": 2026100503
+  },
+  "model_binding": {
+    "mode": "real"
+  },
+  "outlet_subbasin_id": "bengbu",
+  "vic_exe": "/UNBOUND_SERVER_INPUT/vic_exe",
+  "rout_exe": "/UNBOUND_SERVER_INPUT/rout_exe",
+  "objective_weights": {
+    "mean_nse": 0.9,
+    "consistency": 0.1
+  },
+  "phase_config": {
+    "pipeline": [
+      {
+        "name": "VIC_ONLY",
+        "max_rounds": 50,
+        "mc_rounds": 11,
+        "mc_candidates": 3,
+        "patience_rounds": null
+      },
+      {
+        "name": "ROUTING_ONLY",
+        "max_rounds": 30,
+        "mc_rounds": 5,
+        "mc_candidates": 3,
+        "patience_rounds": null
+      },
+      {
+        "name": "JOINT",
+        "max_rounds": 10,
+        "mc_rounds": 0,
+        "mc_candidates": 0,
+        "patience_rounds": null
+      }
+    ]
+  },
+  "param_ranges": {
+    "binfilt": [
+      0.001,
+      0.4
+    ],
+    "Ds": [
+      0.001,
+      1.0
+    ],
+    "Dsmax": [
+      1.0,
+      30.0
+    ],
+    "Ws": [
+      0.5,
+      1.0
+    ],
+    "soil_d2": [
+      0.1,
+      2.0
+    ],
+    "soil_d3": [
+      0.1,
+      2.0
+    ],
+    "velocity": [
+      0.5,
+      3.0
+    ],
+    "diffusivity": [
+      200.0,
+      4000.0
+    ]
+  },
+  "initial_param_center": {
+    "binfilt": 0.2,
+    "Ds": 0.01,
+    "Dsmax": 10.0,
+    "Ws": 0.7,
+    "soil_d2": 0.3,
+    "soil_d3": 1.5,
+    "velocity": 1.5,
+    "diffusivity": 800
+  },
+  "initial_radius": {
+    "binfilt": 0.05,
+    "Ds": 0.05,
+    "Dsmax": 5.0,
+    "Ws": 0.1,
+    "soil_d2": 0.2,
+    "soil_d3": 0.3,
+    "velocity": 0.3,
+    "diffusivity": 500
+  },
+  "leader": {
+    "agent_id": "leader_bengbu",
+    "model": "claude-sonnet-5-5",
+    "provider": "anthropic",
+    "max_tokens": 16384,
+    "api_key_env": "ANTHROPIC_API_KEY",
+    "timeout_sec": 600.0,
+    "max_retries": 3,
+    "retry_delay_sec": 2.0,
+    "base_url": "https://api.anthropic.com",
+    "extra_params": {
+      "prompt_cache_system": true,
+      "retry_max_tokens": 32768,
+      "temperature_policy": "omit"
+    }
+  },
+  "workers": [
+    {
+      "agent_id": "worker_xixian",
+      "subbasin_id": "xixian",
+      "station_code": "XX",
+      "model": "claude-sonnet-5-5",
+      "provider": "anthropic",
+      "max_tokens": 16384,
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "timeout_sec": 600.0,
+      "memory_window": 5,
+      "obs_file": "/UNBOUND_SERVER_INPUT/XX/obs_file",
+      "neighbors_downstream": [
+        "wangjiaba"
+      ],
+      "is_outlet": false,
+      "soil_base": "/UNBOUND_SERVER_INPUT/XX/soil_base",
+      "global_base": "/UNBOUND_SERVER_INPUT/XX/global_base",
+      "rout_template_dir": "/UNBOUND_SERVER_INPUT/XX/rout_template_dir",
+      "rout_exe": "/UNBOUND_SERVER_INPUT/XX/rout_exe",
+      "vic_exe": "/UNBOUND_SERVER_INPUT/XX/vic_exe",
+      "max_retries": 3,
+      "retry_delay_sec": 2.0,
+      "base_url": "https://api.anthropic.com",
+      "extra_params": {
+        "prompt_cache_system": true,
+        "retry_max_tokens": 32768,
+        "temperature_policy": "omit"
+      },
+      "flux_prefix": "huaihe_fluxes_"
+    },
+    {
+      "agent_id": "worker_wangjiaba",
+      "subbasin_id": "wangjiaba",
+      "station_code": "WJB",
+      "model": "claude-sonnet-5-5",
+      "provider": "anthropic",
+      "max_tokens": 16384,
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "timeout_sec": 600.0,
+      "memory_window": 5,
+      "obs_file": "/UNBOUND_SERVER_INPUT/WJB/obs_file",
+      "neighbors_downstream": [
+        "bengbu"
+      ],
+      "is_outlet": false,
+      "soil_base": "/UNBOUND_SERVER_INPUT/WJB/soil_base",
+      "global_base": "/UNBOUND_SERVER_INPUT/WJB/global_base",
+      "rout_template_dir": "/UNBOUND_SERVER_INPUT/WJB/rout_template_dir",
+      "rout_exe": "/UNBOUND_SERVER_INPUT/WJB/rout_exe",
+      "vic_exe": "/UNBOUND_SERVER_INPUT/WJB/vic_exe",
+      "max_retries": 3,
+      "retry_delay_sec": 2.0,
+      "base_url": "https://api.anthropic.com",
+      "extra_params": {
+        "prompt_cache_system": true,
+        "retry_max_tokens": 32768,
+        "temperature_policy": "omit"
+      },
+      "flux_prefix": "huaihe_fluxes_"
+    },
+    {
+      "agent_id": "worker_jiangjiaji",
+      "subbasin_id": "jiangjiaji",
+      "station_code": "JJJ",
+      "model": "claude-sonnet-5-5",
+      "provider": "anthropic",
+      "max_tokens": 16384,
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "timeout_sec": 600.0,
+      "memory_window": 5,
+      "obs_file": "/UNBOUND_SERVER_INPUT/JJJ/obs_file",
+      "neighbors_downstream": [
+        "bengbu"
+      ],
+      "is_outlet": false,
+      "soil_base": "/UNBOUND_SERVER_INPUT/JJJ/soil_base",
+      "global_base": "/UNBOUND_SERVER_INPUT/JJJ/global_base",
+      "rout_template_dir": "/UNBOUND_SERVER_INPUT/JJJ/rout_template_dir",
+      "rout_exe": "/UNBOUND_SERVER_INPUT/JJJ/rout_exe",
+      "vic_exe": "/UNBOUND_SERVER_INPUT/JJJ/vic_exe",
+      "max_retries": 3,
+      "retry_delay_sec": 2.0,
+      "base_url": "https://api.anthropic.com",
+      "extra_params": {
+        "prompt_cache_system": true,
+        "retry_max_tokens": 32768,
+        "temperature_policy": "omit"
+      },
+      "flux_prefix": "huaihe_fluxes_"
+    },
+    {
+      "agent_id": "worker_zhoukou",
+      "subbasin_id": "zhoukou",
+      "station_code": "ZK",
+      "model": "claude-sonnet-5-5",
+      "provider": "anthropic",
+      "max_tokens": 16384,
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "timeout_sec": 600.0,
+      "memory_window": 5,
+      "obs_file": "/UNBOUND_SERVER_INPUT/ZK/obs_file",
+      "neighbors_downstream": [
+        "bengbu"
+      ],
+      "is_outlet": false,
+      "soil_base": "/UNBOUND_SERVER_INPUT/ZK/soil_base",
+      "global_base": "/UNBOUND_SERVER_INPUT/ZK/global_base",
+      "rout_template_dir": "/UNBOUND_SERVER_INPUT/ZK/rout_template_dir",
+      "rout_exe": "/UNBOUND_SERVER_INPUT/ZK/rout_exe",
+      "vic_exe": "/UNBOUND_SERVER_INPUT/ZK/vic_exe",
+      "max_retries": 3,
+      "retry_delay_sec": 2.0,
+      "base_url": "https://api.anthropic.com",
+      "extra_params": {
+        "prompt_cache_system": true,
+        "retry_max_tokens": 32768,
+        "temperature_policy": "omit"
+      },
+      "flux_prefix": "huaihe_fluxes_"
+    },
+    {
+      "agent_id": "worker_bengbu",
+      "subbasin_id": "bengbu",
+      "station_code": "BB",
+      "model": "claude-sonnet-5-5",
+      "provider": "anthropic",
+      "max_tokens": 16384,
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "timeout_sec": 600.0,
+      "memory_window": 5,
+      "obs_file": "/UNBOUND_SERVER_INPUT/BB/obs_file",
+      "neighbors_downstream": [],
+      "is_outlet": true,
+      "soil_base": "/UNBOUND_SERVER_INPUT/BB/soil_base",
+      "global_base": "/UNBOUND_SERVER_INPUT/BB/global_base",
+      "rout_template_dir": "/UNBOUND_SERVER_INPUT/BB/rout_template_dir",
+      "rout_exe": "/UNBOUND_SERVER_INPUT/BB/rout_exe",
+      "vic_exe": "/UNBOUND_SERVER_INPUT/BB/vic_exe",
+      "max_retries": 3,
+      "retry_delay_sec": 2.0,
+      "base_url": "https://api.anthropic.com",
+      "extra_params": {
+        "prompt_cache_system": true,
+        "retry_max_tokens": 32768,
+        "temperature_policy": "omit"
+      },
+      "flux_prefix": "huaihe_fluxes_"
+    }
+  ],
+  "protocol_id": "E_phase_MC_three_fresh90_20261005",
+  "method": "MADR",
+  "warmup_period": {
+    "start_year": 1980,
+    "end_year": 1980
+  },
+  "evaluation_period": {
+    "start_year": 1981,
+    "end_year": 1990
+  },
+  "random_seed": 2026100503,
+  "runtime_audit": {
+    "enabled": true,
+    "retain_candidates": true
+  },
+  "routing_cache": {
+    "enabled": true
+  },
+  "output_root": "outputs/MADR_sonnet_90round",
+  "representative_selection": "max_mean_nse_complete_round",
+  "representative_tie_break": "earliest_round",
+  "test_only": false,
+  "diagnostic_protocol": {
+    "mode": "historical_policy"
+  },
+  "transport_protocol": "api",
+  "llm_failure_policy": {
+    "mode": "historical_fallback",
+    "max_attempts": 3,
+    "retry_delay_sec": 2.0,
+    "timeout_sec": 600.0
+  },
+  "experiment_protocol": {
+    "name": "tra_dual_knowledge_optional_trial_v3",
+    "radius_policy": "inactive",
+    "anti_flip_policy": "measured_direction_momentum_v1",
+    "feedback": "selected_candidate"
+  },
+  "static_input_protocol": {
+    "protocol": "minimal_static_sources_v1",
+    "storage": "markdown",
+    "worker_content": "minimal"
+  },
+  "worker_evidence_mode": "existing",
+  "prompt_visibility_protocol": {
+    "protocol": "minimal_prompt_visibility_v1",
+    "arm": "control"
+  },
+  "api_profile_id": "sonnet_cached",
+  "context_delivery_protocol": {
+    "protocol": "minimal_context_delivery_v1",
+    "arm": "E_refined"
+  },
+  "comparison_variant": "E_refined",
+  "context_efficiency": {
+    "deduplicate_feedback_records": false,
+    "lossless_history": false
+  },
+  "current_evidence_protocol": {
+    "protocol": "E_current_reference_v1",
+    "enabled": true
+  },
+  "_comment": "Huaihe example: five nested stations using three-layer VIC with ARNO baseflow and Lohmann routing. Replace station inputs and topology together for another basin.",
+  "center_reference_cache": {
+    "enabled": true
+  }
+}

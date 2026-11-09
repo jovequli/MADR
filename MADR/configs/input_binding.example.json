@@ -1,0 +1,50 @@
+{
+  "_comment": "Huaihe example input binding. Replace every placeholder with existing absolute Linux paths; replace the worker station set together with the team topology for another basin.",
+  "workers": [
+    {
+      "station_code": "XX",
+      "soil_base": "/srv/madr/data/XX/soil.txt",
+      "global_base": "/srv/madr/data/XX/global.txt",
+      "rout_template_dir": "/srv/madr/data/XX/routing",
+      "obs_file": "/srv/madr/data/XX/observed_discharge.txt",
+      "vic_exe": "/srv/madr/bin/vic",
+      "rout_exe": "/srv/madr/bin/rout"
+    },
+    {
+      "station_code": "WJB",
+      "soil_base": "/srv/madr/data/WJB/soil.txt",
+      "global_base": "/srv/madr/data/WJB/global.txt",
+      "rout_template_dir": "/srv/madr/data/WJB/routing",
+      "obs_file": "/srv/madr/data/WJB/observed_discharge.txt",
+      "vic_exe": "/srv/madr/bin/vic",
+      "rout_exe": "/srv/madr/bin/rout"
+    },
+    {
+      "station_code": "JJJ",
+      "soil_base": "/srv/madr/data/JJJ/soil.txt",
+      "global_base": "/srv/madr/data/JJJ/global.txt",
+      "rout_template_dir": "/srv/madr/data/JJJ/routing",
+      "obs_file": "/srv/madr/data/JJJ/observed_discharge.txt",
+      "vic_exe": "/srv/madr/bin/vic",
+      "rout_exe": "/srv/madr/bin/rout"
+    },
+    {
+      "station_code": "ZK",
+      "soil_base": "/srv/madr/data/ZK/soil.txt",
+      "global_base": "/srv/madr/data/ZK/global.txt",
+      "rout_template_dir": "/srv/madr/data/ZK/routing",
+      "obs_file": "/srv/madr/data/ZK/observed_discharge.txt",
+      "vic_exe": "/srv/madr/bin/vic",
+      "rout_exe": "/srv/madr/bin/rout"
+    },
+    {
+      "station_code": "BB",
+      "soil_base": "/srv/madr/data/BB/soil.txt",
+      "global_base": "/srv/madr/data/BB/global.txt",
+      "rout_template_dir": "/srv/madr/data/BB/routing",
+      "obs_file": "/srv/madr/data/BB/observed_discharge.txt",
+      "vic_exe": "/srv/madr/bin/vic",
+      "rout_exe": "/srv/madr/bin/rout"
+    }
+  ]
+}

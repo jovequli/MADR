@@ -1,0 +1,27 @@
+{
+  "schema": "madr-external-baseline-spec-v1",
+  "id": "S3_single_global_agent",
+  "title": "Calibration with a single global agent and a minimal execution harness",
+  "category": "Structure",
+  "method": "single_global_agent",
+  "protocol": "single_global_agent_full_vector_v1",
+  "runnable": true,
+  "entry": "run.py",
+  "launch_example": "run.json",
+  "reference_physical_config": "../../MADR/configs/MADR_90round.json",
+  "budget": {
+    "global_evaluations": 170,
+    "per_station_evaluations": 170,
+    "initial_default_vectors": 1,
+    "global_agent_proposals": 169,
+    "exploration_evaluations": 0,
+    "center_rechecks": 0,
+    "fixed_flux_preparations": 0,
+    "additional_final_confirmation": 0
+  },
+  "intervention": "One global LLM proposes all station parameters together; no MADR phase schedule, MC, exploration summary, code diagnostic advice, anti-flip, or Leader/Worker decomposition.",
+  "preserve_and_boundaries": "Shared physical inputs, default parameter vector, bounds, precision, date scoring, spatial ownership, model executor, provider profiles, proxy routing, capped retries and attempt accounting. The complete framework is compared, not agent count in isolation. Exhausted API calls repeat a measured complete vector without code diagnostic proposals and are reported as degraded.",
+  "representative_selection": "Highest arithmetic mean evaluation-period NSE of one complete evaluated joint vector; earliest tie.",
+  "activation": "Separate ablations/S3_single_global_agent/run.py entry only. Never loaded by the ordinary MADR/SADR or internal-ablation launchers.",
+  "label": "S3"
+}

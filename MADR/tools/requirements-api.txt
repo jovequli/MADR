@@ -1,0 +1,5 @@
+# Native provider SDK pins; use the shared Python 3.12 environment.
+# Install together with requirements-linux.txt in an isolated Linux venv.
+openai==2.21.0
+anthropic==1.9.0
+google-genai==2.25.0

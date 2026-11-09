@@ -1,0 +1,39 @@
+{
+  "schema": "madr-ablation-spec-v2",
+  "id": "S1",
+  "title": "MADR without the global Leader",
+  "category": "Structure",
+  "method": "MADR",
+  "runnable": true,
+  "baseline_reference": "../../MADR/configs/MADR_90round.json",
+  "intervention": "No Leader API or global guidance; each Worker receives only its own first-three code recommendations filtered to active parameters.",
+  "preserve_and_boundaries": "The Leader is removed by configuration, not through an API failure or the Leader fallback. Round 1 evaluates the default center; later rounds are Worker search rounds.",
+  "shared_execution": "Shared hydrological executor, evaluation period, legal ranges and precision, phase locks except where explicitly ablated, same-background acceptance, center-reference reuse, retry/fallback policy, final confirmation and measured usage accounting remain active.",
+  "default_budget_mode": "matched_reference",
+  "exploration_policy": "compatible_authenticated_50_evaluation_bundle_allowed",
+  "budget": {
+    "scope": "per_subbasin",
+    "initial_exploration": 50,
+    "main_loop_rounds": 90,
+    "single_candidate_rounds": 75,
+    "multi_candidate_rounds": 15,
+    "candidates_per_mc_round": 3,
+    "main_loop_evaluations": 120,
+    "base_total_evaluations": 170,
+    "phase_rounds": [
+      50,
+      30,
+      10
+    ],
+    "phase_mc_rounds": [
+      10,
+      5,
+      0
+    ],
+    "additional_center_rechecks": "reported_separately",
+    "fixed_flux_preparation": "reported_separately"
+  },
+  "activation": "Explicit ablations/run_ablation.py only; ordinary entry points remain unchanged.",
+  "implementation_id": "A1_no_leader",
+  "protocol_version": "madr-ablation-v1"
+}

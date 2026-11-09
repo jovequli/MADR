@@ -1,0 +1,715 @@
+{
+  "schema": "madr-ablation-catalog-v3",
+  "protocol_version": "madr-ablation-v1",
+  "configuration_count": 20,
+  "internal_arms": 19,
+  "external_comparisons": 1,
+  "ablation_count": 12,
+  "sensitivity_count": 5,
+  "sadr_auxiliary_count": 3,
+  "shared_runtime": "../MADR/scripts",
+  "normal_launcher": "../MADR/tools/run_madr.py",
+  "ablation_launcher": "run_ablation.py",
+  "launch_examples": {
+    "MADR": "examples/MADR_ablation_example.json",
+    "SADR": "examples/SADR_ablation_example.json"
+  },
+  "protocol_mapping": "protocol_versions.json",
+  "control_profiles": {
+    "MADR": "../MADR/configs/MADR_90round.json",
+    "SADR": "../MADR/configs/SADR_90round.json"
+  },
+  "execution_policy": "Explicit ablation or external-comparison launch only. Ordinary MADR/SADR entry points do not activate these interventions.",
+  "arms": [
+    {
+      "id": "S1",
+      "category": "Structure",
+      "method": "MADR",
+      "title": "MADR without the global Leader",
+      "spec": "S1_no_leader/spec.json",
+      "readme": "S1_no_leader/README.md",
+      "runnable": true,
+      "budget": {
+        "scope": "per_subbasin",
+        "initial_exploration": 50,
+        "main_loop_rounds": 90,
+        "single_candidate_rounds": 75,
+        "multi_candidate_rounds": 15,
+        "candidates_per_mc_round": 3,
+        "main_loop_evaluations": 120,
+        "base_total_evaluations": 170,
+        "phase_rounds": [
+          50,
+          30,
+          10
+        ],
+        "phase_mc_rounds": [
+          10,
+          5,
+          0
+        ],
+        "additional_center_rechecks": "reported_separately",
+        "fixed_flux_preparation": "reported_separately"
+      },
+      "intervention": "No Leader API or global guidance; each Worker receives only its own first-three code recommendations filtered to active parameters.",
+      "preserve_and_boundaries": "The Leader is removed by configuration, not through an API failure or the Leader fallback. Round 1 evaluates the default center; later rounds are Worker search rounds.",
+      "implementation_id": "A1_no_leader"
+    },
+    {
+      "id": "S2",
+      "category": "Structure",
+      "method": "MADR",
+      "title": "MADR with strict station-by-station calibration",
+      "spec": "S2_strict_sequential/spec.json",
+      "readme": "S2_strict_sequential/README.md",
+      "runnable": true,
+      "budget": {
+        "scope": "per_subbasin",
+        "initial_exploration": 50,
+        "main_loop_rounds": 90,
+        "single_candidate_rounds": 75,
+        "multi_candidate_rounds": 15,
+        "candidates_per_mc_round": 3,
+        "main_loop_evaluations": 120,
+        "base_total_evaluations": 170,
+        "phase_rounds": [
+          50,
+          30,
+          10
+        ],
+        "phase_mc_rounds": [
+          10,
+          5,
+          0
+        ],
+        "additional_center_rechecks": "reported_separately",
+        "fixed_flux_preparation": "reported_separately"
+      },
+      "intervention": "Complete fresh exploration and the entire local calibration schedule for each station, permanently freeze its confirmed effective parameters, then continue downstream.",
+      "preserve_and_boundaries": "Preserve each station local phases, candidate counts, diagnostics, knowledge, schema, acceptance, numerical constraints and recovery. Recursive upstream inputs remain physically frozen. Local NSE replaces unavailable global feedback; downstream exploration starts after upstream freezing. These are intrinsic workflow differences.",
+      "frozen_upstream_diagnostics": "Code diagnostics use each direct upstream station's finite successful terminal-confirmation NSE under its permanently frozen ancestor background, with the shared NSE < 0.5 quality rule. These records do not add active agents, change physical inputs, or create a global performance panel.",
+      "implementation_id": "A3_strict_sequential"
+    },
+    {
+      "id": "S3",
+      "category": "Structure",
+      "method": "single_global_agent",
+      "title": "Calibration with a single global agent and a minimal execution harness",
+      "spec": "S3_single_global_agent/spec.json",
+      "readme": "S3_single_global_agent/README.md",
+      "runnable": true,
+      "budget": {
+        "global_evaluations": 170,
+        "per_station_evaluations": 170,
+        "initial_default_vectors": 1,
+        "global_agent_proposals": 169,
+        "exploration_evaluations": 0,
+        "center_rechecks": 0,
+        "fixed_flux_preparations": 0,
+        "additional_final_confirmation": 0
+      },
+      "note": "Separate minimal external harness: one complete default parameter vector, then 169 whole-network proposal vectors. This is not the MADR phased main-loop schedule.",
+      "launch_examples": [
+        "S3_single_global_agent/run.json"
+      ],
+      "intervention": "One global LLM proposes all station parameters together; no MADR phase schedule, MC, exploration summary, code diagnostic advice, anti-flip, or Leader/Worker decomposition.",
+      "preserve_and_boundaries": "Shared physical inputs, default parameter vector, bounds, precision, date scoring, spatial ownership, model executor, provider profiles, proxy routing, capped retries and attempt accounting. The complete framework is compared, not agent count in isolation. Exhausted API calls repeat a measured complete vector without code diagnostic proposals and are reported as degraded."
+    },
+    {
+      "id": "I1",
+      "category": "Information",
+      "method": "MADR",
+      "title": "MADR without explicit upstream-update messages",
+      "spec": "I1_no_upstream_updates/spec.json",
+      "readme": "I1_no_upstream_updates/README.md",
+      "runnable": true,
+      "budget": {
+        "scope": "per_subbasin",
+        "initial_exploration": 50,
+        "main_loop_rounds": 90,
+        "single_candidate_rounds": 75,
+        "multi_candidate_rounds": 15,
+        "candidates_per_mc_round": 3,
+        "main_loop_evaluations": 120,
+        "base_total_evaluations": 170,
+        "phase_rounds": [
+          50,
+          30,
+          10
+        ],
+        "phase_mc_rounds": [
+          10,
+          5,
+          0
+        ],
+        "additional_center_rechecks": "reported_separately",
+        "fixed_flux_preparation": "reported_separately"
+      },
+      "intervention": "Hide the explicit same-round upstream-change explanation from downstream Worker input.",
+      "preserve_and_boundaries": "Keep current reference metrics and diagnosis, topology, upstream-background identities and compatibility checks, center rechecks and acceptance. Hide only the explicit current-round upstream parameter-change/contrast message, not all evidence of upstream dependence.",
+      "implementation_id": "A2_no_current_upstream_hints"
+    },
+    {
+      "id": "I2",
+      "category": "Information",
+      "method": "MADR",
+      "title": "MADR without J_total feedback",
+      "spec": "I2_no_j_feedback/spec.json",
+      "readme": "I2_no_j_feedback/README.md",
+      "runnable": true,
+      "budget": {
+        "scope": "per_subbasin",
+        "initial_exploration": 50,
+        "main_loop_rounds": 90,
+        "single_candidate_rounds": 75,
+        "multi_candidate_rounds": 15,
+        "candidates_per_mc_round": 3,
+        "main_loop_evaluations": 120,
+        "base_total_evaluations": 170,
+        "phase_rounds": [
+          50,
+          30,
+          10
+        ],
+        "phase_mc_rounds": [
+          10,
+          5,
+          0
+        ],
+        "additional_center_rechecks": "reported_separately",
+        "fixed_flux_preparation": "reported_separately"
+      },
+      "intervention": "Remove J_total from model-facing current feedback, historical score columns, runtime formula/weights and code recovery assessments; do not introduce a replacement aggregate.",
+      "preserve_and_boundaries": "Retain all existing individual metrics, existing outlet/mean NSE fields, diagnostic information, history round coverage and station-detail window. Shared numerical objectives, archives, local acceptance, recovery actions and final representative selection are unchanged.",
+      "interpretation": "Tests removal of the supplied composite J_total feedback and its all-round trajectory; mean and outlet NSE remain visible.",
+      "history_limitation": "Recent five-round station details and the best NSE so far remain; the all-round aggregate trajectory is removed with the J column.",
+      "implementation_id": "B1_mean_nse_feedback"
+    },
+    {
+      "id": "I3",
+      "category": "Information",
+      "method": "MADR",
+      "title": "MADR without code-generated diagnostic advice",
+      "spec": "I3_no_code_advice/spec.json",
+      "readme": "I3_no_code_advice/README.md",
+      "runnable": true,
+      "budget": {
+        "scope": "per_subbasin",
+        "initial_exploration": 50,
+        "main_loop_rounds": 90,
+        "single_candidate_rounds": 75,
+        "multi_candidate_rounds": 15,
+        "candidates_per_mc_round": 3,
+        "main_loop_evaluations": 120,
+        "base_total_evaluations": 170,
+        "phase_rounds": [
+          50,
+          30,
+          10
+        ],
+        "phase_mc_rounds": [
+          10,
+          5,
+          0
+        ],
+        "additional_center_rechecks": "reported_separately",
+        "fixed_flux_preparation": "reported_separately"
+      },
+      "intervention": "Withhold source-identified online code-generated hydrological diagnostic advice and global status heuristics from agent inputs; retain the complete original exploration summary and independent expert knowledge.",
+      "preserve_and_boundaries": "Keep measured metrics and definitions, the unchanged exploration summary including top/bottom association directions, topology, execution identities, numerical global/local progress, expert knowledge, model-authored reasoning and unchanged numerical failure recovery. Do not alter diagnostic calculations, acceptance or scheduling.",
+      "implementation_id": "B2_no_code_diagnostic_hints"
+    },
+    {
+      "id": "I4",
+      "category": "Information",
+      "method": "MADR",
+      "title": "MADR without supplied parameter-mechanism knowledge",
+      "spec": "I4_no_expert_knowledge/spec.json",
+      "readme": "I4_no_expert_knowledge/README.md",
+      "runnable": true,
+      "budget": {
+        "scope": "per_subbasin",
+        "initial_exploration": 50,
+        "main_loop_rounds": 90,
+        "single_candidate_rounds": 75,
+        "multi_candidate_rounds": 15,
+        "candidates_per_mc_round": 3,
+        "main_loop_evaluations": 120,
+        "base_total_evaluations": 170,
+        "phase_rounds": [
+          50,
+          30,
+          10
+        ],
+        "phase_mc_rounds": [
+          10,
+          5,
+          0
+        ],
+        "additional_center_rechecks": "reported_separately",
+        "fixed_flux_preparation": "reported_separately"
+      },
+      "intervention": "Remove the separately supplied physical interpretations, conditional expert hypotheses and expert priorities from both roles.",
+      "preserve_and_boundaries": "Keep metric definitions, parameter names and bounds, executable constraints, role tasks and output contracts. Keep code-generated hints. This does not remove the model's pretrained knowledge. Preserve generic evidence limitations, missing-data cautions, and definitions used to interpret measured diagnostics; these are not parameter-mechanism priors.",
+      "implementation_id": "B3_no_expert_knowledge"
+    },
+    {
+      "id": "I5",
+      "category": "Information",
+      "method": "MADR",
+      "title": "MADR without anti-flip filtering",
+      "spec": "I5_no_anti_flip/spec.json",
+      "readme": "I5_no_anti_flip/README.md",
+      "runnable": true,
+      "budget": {
+        "scope": "per_subbasin",
+        "initial_exploration": 50,
+        "main_loop_rounds": 90,
+        "single_candidate_rounds": 75,
+        "multi_candidate_rounds": 15,
+        "candidates_per_mc_round": 3,
+        "main_loop_evaluations": 120,
+        "base_total_evaluations": 170,
+        "phase_rounds": [
+          50,
+          30,
+          10
+        ],
+        "phase_mc_rounds": [
+          10,
+          5,
+          0
+        ],
+        "additional_center_rechecks": "reported_separately",
+        "fixed_flux_preparation": "reported_separately"
+      },
+      "intervention": "Bypass anti-flip filtering of guidance.",
+      "preserve_and_boundaries": "Keep accounting of realized parameter changes and same-background gains, parameter constraints, and candidate acceptance unchanged.",
+      "implementation_id": "C5_no_anti_flip"
+    },
+    {
+      "id": "P1",
+      "category": "Procedure",
+      "method": "MADR",
+      "title": "MADR without initial exploration",
+      "spec": "P1_no_exploration/spec.json",
+      "readme": "P1_no_exploration/README.md",
+      "runnable": true,
+      "budget": {
+        "scope": "per_subbasin",
+        "initial_exploration": 0,
+        "main_loop_rounds": 90,
+        "single_candidate_rounds": 75,
+        "multi_candidate_rounds": 15,
+        "candidates_per_mc_round": 3,
+        "main_loop_evaluations": 120,
+        "base_total_evaluations": 120,
+        "phase_rounds": [
+          50,
+          30,
+          10
+        ],
+        "phase_mc_rounds": [
+          10,
+          5,
+          0
+        ],
+        "additional_center_rechecks": "reported_separately",
+        "fixed_flux_preparation": "reported_separately"
+      },
+      "intervention": "Skip initial exploration and provide no exploration summaries to either role.",
+      "preserve_and_boundaries": "The reference main-loop phases, MC slots, round count, initial center, final confirmation and recovery are unchanged. The exploration evaluations are not reallocated, and no exploration bundle or cached summary is accepted.",
+      "implementation_id": "C1_no_exploration"
+    },
+    {
+      "id": "P2",
+      "category": "Procedure",
+      "method": "MADR",
+      "title": "MADR without multi-candidate search",
+      "spec": "P2_no_mc/spec.json",
+      "readme": "P2_no_mc/README.md",
+      "runnable": true,
+      "budget": {
+        "scope": "per_subbasin",
+        "initial_exploration": 50,
+        "main_loop_rounds": 120,
+        "single_candidate_rounds": 120,
+        "multi_candidate_rounds": 0,
+        "candidates_per_mc_round": 0,
+        "main_loop_evaluations": 120,
+        "base_total_evaluations": 170,
+        "phase_rounds": [
+          70,
+          40,
+          10
+        ],
+        "phase_mc_rounds": [
+          0,
+          0,
+          0
+        ],
+        "additional_center_rechecks": "reported_separately",
+        "fixed_flux_preparation": "reported_separately"
+      },
+      "intervention": "Use one proposal per station search round instead of MC.",
+      "preserve_and_boundaries": "Both mc_rounds and mc_candidates are zero in every phase. The reference candidate-evaluation budget is matched by adjusting the round counts.",
+      "implementation_id": "C2_no_multi_candidate"
+    },
+    {
+      "id": "P3",
+      "category": "Procedure",
+      "method": "MADR",
+      "title": "MADR without phase separation",
+      "spec": "P3_no_phases/spec.json",
+      "readme": "P3_no_phases/README.md",
+      "runnable": true,
+      "budget": {
+        "scope": "per_subbasin",
+        "initial_exploration": 50,
+        "main_loop_rounds": 90,
+        "single_candidate_rounds": 75,
+        "multi_candidate_rounds": 15,
+        "candidates_per_mc_round": 3,
+        "main_loop_evaluations": 120,
+        "base_total_evaluations": 170,
+        "phase_rounds": [
+          90
+        ],
+        "phase_mc_rounds": [
+          15
+        ],
+        "additional_center_rechecks": "reported_separately",
+        "fixed_flux_preparation": "reported_separately"
+      },
+      "intervention": "Allow joint search over all calibrated parameters throughout the main search.",
+      "preserve_and_boundaries": "All physical bounds are retained. The small-step wording of the final JOINT phase is not applied to the whole run. The multi-candidate rounds are kept.",
+      "implementation_id": "C3_no_phase_schedule"
+    },
+    {
+      "id": "P4",
+      "category": "Procedure",
+      "method": "MADR",
+      "title": "MADR without multi-candidate search and phase separation",
+      "spec": "P4_no_mc_no_phases/spec.json",
+      "readme": "P4_no_mc_no_phases/README.md",
+      "runnable": true,
+      "budget": {
+        "scope": "per_subbasin",
+        "initial_exploration": 50,
+        "main_loop_rounds": 120,
+        "single_candidate_rounds": 120,
+        "multi_candidate_rounds": 0,
+        "candidates_per_mc_round": 0,
+        "main_loop_evaluations": 120,
+        "base_total_evaluations": 170,
+        "phase_rounds": [
+          120
+        ],
+        "phase_mc_rounds": [
+          0
+        ],
+        "additional_center_rechecks": "reported_separately",
+        "fixed_flux_preparation": "reported_separately"
+      },
+      "intervention": "Combine the no-MC and no-phase interventions.",
+      "preserve_and_boundaries": "Combines the P2 and P3 interventions on the shared executor and agent framework, with an equal-budget single-candidate schedule.",
+      "implementation_id": "C4_no_mc_no_phases"
+    },
+    {
+      "id": "H1",
+      "category": "Budget and phase sensitivity",
+      "method": "MADR",
+      "title": "Long-budget calibration",
+      "spec": "H1_extended_budget/spec.json",
+      "readme": "H1_extended_budget/README.md",
+      "runnable": true,
+      "budget": {
+        "scope": "per_subbasin",
+        "initial_exploration": 50,
+        "main_loop_rounds": 180,
+        "single_candidate_rounds": 150,
+        "multi_candidate_rounds": 30,
+        "candidates_per_mc_round": 3,
+        "main_loop_evaluations": 240,
+        "base_total_evaluations": 290,
+        "phase_rounds": [
+          100,
+          60,
+          20
+        ],
+        "phase_mc_rounds": [
+          20,
+          10,
+          0
+        ],
+        "additional_center_rechecks": "reported_separately",
+        "fixed_flux_preparation": "reported_separately"
+      },
+      "intervention": "Double the baseline main candidate budget using 100/60/20 main-loop rounds and 20/10/0 MC rounds. Keep exploration at 50.",
+      "preserve_and_boundaries": "This changes search strength and its phase allocation; it is not an exact continuation of the baseline after round 90. Select parameters using calibration evidence only, then evaluate the frozen selected vector on validation data.",
+      "implementation_id": "sensitivity_extended_budget"
+    },
+    {
+      "id": "H2",
+      "category": "Budget and phase sensitivity",
+      "method": "MADR",
+      "title": "No exploration with 50 replacement online evaluations",
+      "spec": "H2_no_exploration_matched/spec.json",
+      "readme": "H2_no_exploration_matched/README.md",
+      "runnable": true,
+      "budget": {
+        "scope": "per_subbasin",
+        "initial_exploration": 0,
+        "main_loop_rounds": 140,
+        "single_candidate_rounds": 125,
+        "multi_candidate_rounds": 15,
+        "candidates_per_mc_round": 3,
+        "main_loop_evaluations": 170,
+        "base_total_evaluations": 170,
+        "phase_rounds": [
+          100,
+          30,
+          10
+        ],
+        "phase_mc_rounds": [
+          10,
+          5,
+          0
+        ],
+        "additional_center_rechecks": "reported_separately",
+        "fixed_flux_preparation": "reported_separately"
+      },
+      "intervention": "Remove exploration and both roles' exploration summaries, and allocate 50 additional single-candidate evaluations to the VIC phase.",
+      "preserve_and_boundaries": "Use 100/30/10 main-loop rounds and the baseline 10/5 MC rounds. The default center remains unchanged. This is a matched base-evaluation-budget substitution, with more LLM interactions than the baseline.",
+      "implementation_id": "sensitivity_no_exploration_matched"
+    },
+    {
+      "id": "H3",
+      "category": "Budget and phase sensitivity",
+      "method": "MADR",
+      "title": "Phase lengths 40/40/10",
+      "spec": "H3_phase40_40_10/spec.json",
+      "readme": "H3_phase40_40_10/README.md",
+      "runnable": true,
+      "budget": {
+        "scope": "per_subbasin",
+        "initial_exploration": 50,
+        "main_loop_rounds": 90,
+        "single_candidate_rounds": 75,
+        "multi_candidate_rounds": 15,
+        "candidates_per_mc_round": 3,
+        "main_loop_evaluations": 120,
+        "base_total_evaluations": 170,
+        "phase_rounds": [
+          40,
+          40,
+          10
+        ],
+        "phase_mc_rounds": [
+          10,
+          5,
+          0
+        ],
+        "additional_center_rechecks": "reported_separately",
+        "fixed_flux_preparation": "reported_separately"
+      },
+      "intervention": "Use VIC/routing/JOINT phase lengths of 40/40/10, retaining 10/5 MC rounds.",
+      "preserve_and_boundaries": "Keep 90 main-loop rounds, 120 main evaluations and 50 exploration samples. Move phase boundaries only; retain phase-specific parameter locks and prompts.",
+      "implementation_id": "sensitivity_phase40_40_10"
+    },
+    {
+      "id": "H4",
+      "category": "Budget and phase sensitivity",
+      "method": "MADR",
+      "title": "Phase lengths 60/20/10",
+      "spec": "H4_phase60_20_10/spec.json",
+      "readme": "H4_phase60_20_10/README.md",
+      "runnable": true,
+      "budget": {
+        "scope": "per_subbasin",
+        "initial_exploration": 50,
+        "main_loop_rounds": 90,
+        "single_candidate_rounds": 75,
+        "multi_candidate_rounds": 15,
+        "candidates_per_mc_round": 3,
+        "main_loop_evaluations": 120,
+        "base_total_evaluations": 170,
+        "phase_rounds": [
+          60,
+          20,
+          10
+        ],
+        "phase_mc_rounds": [
+          10,
+          5,
+          0
+        ],
+        "additional_center_rechecks": "reported_separately",
+        "fixed_flux_preparation": "reported_separately"
+      },
+      "intervention": "Use VIC/routing/JOINT phase lengths of 60/20/10, retaining 10/5 MC rounds.",
+      "preserve_and_boundaries": "Keep 90 main-loop rounds, 120 main evaluations and 50 exploration samples. Move phase boundaries only; retain phase-specific parameter locks and prompts.",
+      "implementation_id": "sensitivity_phase60_20_10"
+    },
+    {
+      "id": "H5",
+      "category": "Budget and phase sensitivity",
+      "method": "MADR",
+      "title": "Phase lengths 45/25/20",
+      "spec": "H5_phase45_25_20/spec.json",
+      "readme": "H5_phase45_25_20/README.md",
+      "runnable": true,
+      "budget": {
+        "scope": "per_subbasin",
+        "initial_exploration": 50,
+        "main_loop_rounds": 90,
+        "single_candidate_rounds": 75,
+        "multi_candidate_rounds": 15,
+        "candidates_per_mc_round": 3,
+        "main_loop_evaluations": 120,
+        "base_total_evaluations": 170,
+        "phase_rounds": [
+          45,
+          25,
+          20
+        ],
+        "phase_mc_rounds": [
+          10,
+          5,
+          0
+        ],
+        "additional_center_rechecks": "reported_separately",
+        "fixed_flux_preparation": "reported_separately"
+      },
+      "intervention": "Use VIC/routing/JOINT phase lengths of 45/25/20, retaining 10/5 MC rounds.",
+      "preserve_and_boundaries": "Keep 90 main-loop rounds, 120 main evaluations and 50 exploration samples. Increase JOINT allocation while preserving its accepted-center refinement semantics.",
+      "implementation_id": "sensitivity_phase45_25_20"
+    },
+    {
+      "id": "SADR-E",
+      "category": "SADR auxiliary mechanisms",
+      "method": "SADR",
+      "title": "SADR without escape",
+      "spec": "SADR-E_no_escape/spec.json",
+      "readme": "SADR-E_no_escape/README.md",
+      "runnable": true,
+      "budget": {
+        "scope": "per_subbasin",
+        "initial_exploration": 50,
+        "main_loop_rounds": 90,
+        "single_candidate_rounds": 75,
+        "multi_candidate_rounds": 15,
+        "candidates_per_mc_round": 3,
+        "main_loop_evaluations": 120,
+        "base_total_evaluations": 170,
+        "phase_rounds": [
+          50,
+          30,
+          10
+        ],
+        "phase_mc_rounds": [
+          10,
+          5,
+          0
+        ],
+        "additional_center_rechecks": "reported_separately",
+        "fixed_flux_preparation": "reported_separately"
+      },
+      "intervention": "Disable escape triggering and escape proposals.",
+      "preserve_and_boundaries": "Step decay, normal perturbations, Leader guidance, MC slots and common execution are retained. Escape is switched off directly.",
+      "implementation_id": "C6_sadr_no_escape"
+    },
+    {
+      "id": "SADR-D",
+      "category": "SADR auxiliary mechanisms",
+      "method": "SADR",
+      "title": "SADR without step decay",
+      "spec": "SADR-D_no_decay/spec.json",
+      "readme": "SADR-D_no_decay/README.md",
+      "runnable": true,
+      "budget": {
+        "scope": "per_subbasin",
+        "initial_exploration": 50,
+        "main_loop_rounds": 90,
+        "single_candidate_rounds": 75,
+        "multi_candidate_rounds": 15,
+        "candidates_per_mc_round": 3,
+        "main_loop_evaluations": 120,
+        "base_total_evaluations": 170,
+        "phase_rounds": [
+          50,
+          30,
+          10
+        ],
+        "phase_mc_rounds": [
+          10,
+          5,
+          0
+        ],
+        "additional_center_rechecks": "reported_separately",
+        "fixed_flux_preparation": "reported_separately"
+      },
+      "intervention": "Remove within-phase time decay from rule-Worker steps.",
+      "preserve_and_boundaries": "Each phase's predefined step scale, normal perturbations, escape and MC are retained. The step multiplier stays at a fixed value within each phase.",
+      "implementation_id": "C7_sadr_no_decay"
+    },
+    {
+      "id": "SADR-ED",
+      "category": "SADR auxiliary mechanisms",
+      "method": "SADR",
+      "title": "SADR without escape and step decay",
+      "spec": "SADR-ED_no_escape_no_decay/spec.json",
+      "readme": "SADR-ED_no_escape_no_decay/README.md",
+      "runnable": true,
+      "budget": {
+        "scope": "per_subbasin",
+        "initial_exploration": 50,
+        "main_loop_rounds": 90,
+        "single_candidate_rounds": 75,
+        "multi_candidate_rounds": 15,
+        "candidates_per_mc_round": 3,
+        "main_loop_evaluations": 120,
+        "base_total_evaluations": 170,
+        "phase_rounds": [
+          50,
+          30,
+          10
+        ],
+        "phase_mc_rounds": [
+          10,
+          5,
+          0
+        ],
+        "additional_center_rechecks": "reported_separately",
+        "fixed_flux_preparation": "reported_separately"
+      },
+      "intervention": "Combine the no-escape and no-decay interventions.",
+      "preserve_and_boundaries": "Uses both switches, with the same phase scales and perturbation policy as SADR-E and SADR-D.",
+      "implementation_id": "C8_sadr_no_escape_no_decay"
+    }
+  ],
+  "batch_pairing": {
+    "schema": "madr-ablation-pairing-v1",
+    "launcher": "make_batch.py",
+    "formal_repetitions": 5,
+    "all_internal_count": 19,
+    "controls_included_by_default": false,
+    "include_controls_flag": "--include-controls",
+    "reference_methods": {
+      "SADR-E": "SADR",
+      "SADR-D": "SADR",
+      "SADR-ED": "SADR",
+      "other_internal_arms": "MADR"
+    },
+    "reuse_policy": "One compatible authenticated standard exploration bundle per reference method and repetition; distinct main and exploration seeds across repetitions.",
+    "fresh_exploration_arms": [
+      "S2"
+    ],
+    "no_exploration_arms": [
+      "P1",
+      "H2"
+    ],
+    "single_source_flag": "--exploration-source is single-repetition only and mutually exclusive with --pairing-manifest",
+    "external_entry": "S3_single_global_agent/"
+  }
+}

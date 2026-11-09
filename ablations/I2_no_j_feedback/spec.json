@@ -1,0 +1,42 @@
+{
+  "schema": "madr-ablation-spec-v2",
+  "id": "I2",
+  "title": "MADR without J_total feedback",
+  "category": "Information",
+  "method": "MADR",
+  "runnable": true,
+  "baseline_reference": "../../MADR/configs/MADR_90round.json",
+  "intervention": "Remove J_total from model-facing current feedback, historical score columns, runtime formula/weights and code recovery assessments; do not introduce a replacement aggregate.",
+  "preserve_and_boundaries": "Retain all existing individual metrics, existing outlet/mean NSE fields, diagnostic information, history round coverage and station-detail window. Shared numerical objectives, archives, local acceptance, recovery actions and final representative selection are unchanged.",
+  "shared_execution": "Shared hydrological executor, evaluation period, legal ranges and precision, phase locks except where explicitly ablated, same-background acceptance, center-reference reuse, retry/fallback policy, final confirmation and measured usage accounting remain active.",
+  "default_budget_mode": "matched_reference",
+  "exploration_policy": "compatible_authenticated_50_evaluation_bundle_allowed",
+  "budget": {
+    "scope": "per_subbasin",
+    "initial_exploration": 50,
+    "main_loop_rounds": 90,
+    "single_candidate_rounds": 75,
+    "multi_candidate_rounds": 15,
+    "candidates_per_mc_round": 3,
+    "main_loop_evaluations": 120,
+    "base_total_evaluations": 170,
+    "phase_rounds": [
+      50,
+      30,
+      10
+    ],
+    "phase_mc_rounds": [
+      10,
+      5,
+      0
+    ],
+    "additional_center_rechecks": "reported_separately",
+    "fixed_flux_preparation": "reported_separately"
+  },
+  "activation": "Explicit ablations/run_ablation.py only; ordinary entry points remain unchanged.",
+  "interpretation": "Tests removal of the supplied composite J_total feedback and its all-round trajectory; mean and outlet NSE remain visible.",
+  "retained_feedback": "Current mean_subbasin_NSE and outlet_NSE, all original individual metrics including PR/LFR, recent five-round station detail, historical best NSE and existing progress summaries.",
+  "history_limitation": "Recent five-round station details and the best NSE so far remain; the all-round aggregate trajectory is removed with the J column.",
+  "implementation_id": "B1_mean_nse_feedback",
+  "protocol_version": "madr-ablation-v1"
+}

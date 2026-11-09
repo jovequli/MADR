@@ -1,0 +1,39 @@
+{
+  "schema": "madr-ablation-spec-v2",
+  "id": "H2",
+  "title": "No exploration with 50 replacement online evaluations",
+  "category": "Budget and phase sensitivity",
+  "method": "MADR",
+  "runnable": true,
+  "baseline_reference": "../../MADR/configs/MADR_90round.json",
+  "intervention": "Remove exploration and both roles' exploration summaries, and allocate 50 additional single-candidate evaluations to the VIC phase.",
+  "preserve_and_boundaries": "Use 100/30/10 main-loop rounds and the baseline 10/5 MC rounds. The default center remains unchanged. This is a matched base-evaluation-budget substitution, with more LLM interactions than the baseline.",
+  "shared_execution": "Shared hydrological executor, evaluation period, legal ranges and precision, phase locks except where explicitly ablated, same-background acceptance, center-reference reuse, retry/fallback policy, final confirmation and measured usage accounting remain active.",
+  "default_budget_mode": "sensitivity_schedule",
+  "exploration_policy": "fresh_required",
+  "budget": {
+    "scope": "per_subbasin",
+    "initial_exploration": 0,
+    "main_loop_rounds": 140,
+    "single_candidate_rounds": 125,
+    "multi_candidate_rounds": 15,
+    "candidates_per_mc_round": 3,
+    "main_loop_evaluations": 170,
+    "base_total_evaluations": 170,
+    "phase_rounds": [
+      100,
+      30,
+      10
+    ],
+    "phase_mc_rounds": [
+      10,
+      5,
+      0
+    ],
+    "additional_center_rechecks": "reported_separately",
+    "fixed_flux_preparation": "reported_separately"
+  },
+  "activation": "Explicit ablations/run_ablation.py only; ordinary entry points remain unchanged.",
+  "protocol_version": "madr-ablation-v1",
+  "implementation_id": "sensitivity_no_exploration_matched"
+}

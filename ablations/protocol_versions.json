@@ -1,0 +1,63 @@
+{
+  "schema": "madr-ablation-protocol-v1",
+  "current_protocol": "madr-ablation-v1",
+  "configuration_count": 20,
+  "internal_arms": 19,
+  "external_comparisons": 1,
+  "groups": {
+    "structure": [
+      "S1",
+      "S2",
+      "S3"
+    ],
+    "information": [
+      "I1",
+      "I2",
+      "I3",
+      "I4",
+      "I5"
+    ],
+    "procedure": [
+      "P1",
+      "P2",
+      "P3",
+      "P4"
+    ],
+    "budget_and_phase_sensitivity": [
+      "H1",
+      "H2",
+      "H3",
+      "H4",
+      "H5"
+    ],
+    "sadr_auxiliary": [
+      "SADR-E",
+      "SADR-D",
+      "SADR-ED"
+    ]
+  },
+  "implementations": {
+    "S1": "A1_no_leader",
+    "S2": "A3_strict_sequential",
+    "I1": "A2_no_current_upstream_hints",
+    "I2": "B1_mean_nse_feedback",
+    "I3": "B2_no_code_diagnostic_hints",
+    "I4": "B3_no_expert_knowledge",
+    "I5": "C5_no_anti_flip",
+    "P1": "C1_no_exploration",
+    "P2": "C2_no_multi_candidate",
+    "P3": "C3_no_phase_schedule",
+    "P4": "C4_no_mc_no_phases",
+    "H1": "sensitivity_extended_budget",
+    "H2": "sensitivity_no_exploration_matched",
+    "H3": "sensitivity_phase40_40_10",
+    "H4": "sensitivity_phase60_20_10",
+    "H5": "sensitivity_phase45_25_20",
+    "SADR-E": "C6_sadr_no_escape",
+    "SADR-D": "C7_sadr_no_decay",
+    "SADR-ED": "C8_sadr_no_escape_no_decay"
+  },
+  "external_protocols": {
+    "S3": "single_global_agent_full_vector_v1"
+  }
+}

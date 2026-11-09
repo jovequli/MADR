@@ -1,0 +1,203 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LeaderRoundDecision",
+  "description": "Leader LLM output after reviewing all worker results for one round.",
+  "type": "object",
+  "required": [
+    "overall_assessment",
+    "worker_guidance"
+  ],
+  "properties": {
+    "round_id": {
+      "type": "integer",
+      "description": "Optional context-known round number; the graph supplies it if omitted.",
+      "x-runtime-owned": true
+    },
+    "overall_assessment": {
+      "type": "string",
+      "description": "One concise global judgment; do not repeat station actions.",
+      "x-nonblank": true
+    },
+    "global_score_trend": {
+      "type": "string",
+      "description": "Descriptive trend, e.g. baseline, improving, plateauing, or declining; this text does not control the scheduler."
+    },
+    "stop_or_continue": {
+      "type": "string",
+      "enum": [
+        "continue",
+        "stop"
+      ],
+      "description": "For the fixed-budget matched comparison return continue; the configured scheduler controls termination.",
+      "x-runtime-owned": true
+    },
+    "stop_reason": {
+      "type": "string",
+      "description": "If stop, explain why (e.g., target reached, plateau detected).",
+      "x-runtime-owned": true
+    },
+    "worker_guidance": {
+      "type": "array",
+      "description": "Per-worker guidance for the next round.",
+      "items": {
+        "type": "object",
+        "required": [
+          "subbasin_id",
+          "priority_focus",
+          "param_adjustments"
+        ],
+        "properties": {
+          "subbasin_id": {
+            "type": "string",
+            "description": "Target subbasin identifier."
+          },
+          "priority_focus": {
+            "type": "string",
+            "description": "What this worker should focus on next round (e.g., 'reduce peak overshoot', 'improve low flow', 'decrease PBIAS')."
+          },
+          "param_adjustments": {
+            "type": "array",
+            "description": "Suggested direction for each parameter.",
+            "items": {
+              "type": "object",
+              "required": [
+                "param",
+                "direction",
+                "magnitude"
+              ],
+              "properties": {
+                "param": {
+                  "type": "string",
+                  "enum": [
+                    "binfilt",
+                    "Ds",
+                    "Dsmax",
+                    "Ws",
+                    "soil_d2",
+                    "soil_d3",
+                    "velocity",
+                    "diffusivity"
+                  ]
+                },
+                "direction": {
+                  "type": "string",
+                  "enum": [
+                    "increase",
+                    "decrease",
+                    "hold"
+                  ],
+                  "description": "Direction of adjustment."
+                },
+                "magnitude": {
+                  "type": "string",
+                  "enum": [
+                    "large",
+                    "medium",
+                    "small",
+                    "none"
+                  ],
+                  "description": "Relative magnitude of adjustment."
+                },
+                "reasoning": {
+                  "type": "string",
+                  "description": "Brief physical reasoning for this adjustment."
+                },
+                "reason": {
+                  "type": "string",
+                  "description": "Legacy alias of reasoning.",
+                  "x-legacy-alias": true
+                },
+                "evidence_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "coupled_group": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "search_radius_hint": {
+            "type": "string",
+            "enum": [
+              "keep"
+            ],
+            "description": "Inactive compatibility field. Always return keep; radius does not scale candidates.",
+            "x-runtime-owned": true
+          },
+          "trial": {
+            "description": "Optional explanatory annotation; omission/null or malformed content is audited but does not invalidate otherwise legal physical guidance. Never invent evidence. Preferred complete shape is documented in x-annotation-schema.",
+            "x-annotation-schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "evidence_refs",
+                "hypothesis",
+                "uncertainty",
+                "expected_response"
+              ],
+              "properties": {
+                "evidence_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "hypothesis": {
+                  "type": "string",
+                  "x-nonblank": true
+                },
+                "uncertainty": {
+                  "type": "string",
+                  "x-nonblank": true
+                },
+                "expected_response": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "metric",
+                      "direction"
+                    ],
+                    "properties": {
+                      "metric": {
+                        "type": "string"
+                      },
+                      "direction": {
+                        "type": "string",
+                        "enum": [
+                          "increase",
+                          "decrease",
+                          "toward_zero",
+                          "toward_one",
+                          "stable",
+                          "unknown"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "phase_recommendation": {
+      "type": "string",
+      "enum": [
+        "stay",
+        "advance"
+      ],
+      "description": "For the fixed-budget matched comparison return stay; phase transitions are controlled by the configured scheduler.",
+      "x-runtime-owned": true
+    },
+    "next_round_strategy": {
+      "type": "string",
+      "description": "High-level strategy for next round (e.g., 'fine-tune around current best', 'explore wider for soil_d3', 'lock upstream and focus outlet')."
+    }
+  }
+}

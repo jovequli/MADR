@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "settings_file": "../../MADR/configs/settings.json",
+  "physical_config": "../../MADR/configs/MADR_90round.json",
+  "run_name": "S3_single_global_agent_sonnet_rep1",
+  "api_profile": "sonnet_cached",
+  "global_evaluations": 170,
+  "history_window": 5,
+  "random_seed": 2026100901,
+  "_comment": "One default full-vector evaluation followed by 169 global-agent proposals. Each full vector evaluates every configured station once."
+}

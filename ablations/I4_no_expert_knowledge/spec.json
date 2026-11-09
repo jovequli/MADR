@@ -1,0 +1,39 @@
+{
+  "schema": "madr-ablation-spec-v2",
+  "id": "I4",
+  "title": "MADR without supplied parameter-mechanism knowledge",
+  "category": "Information",
+  "method": "MADR",
+  "runnable": true,
+  "baseline_reference": "../../MADR/configs/MADR_90round.json",
+  "intervention": "Remove the separately supplied physical interpretations, conditional expert hypotheses and expert priorities from both roles.",
+  "preserve_and_boundaries": "Keep metric definitions, parameter names and bounds, executable constraints, role tasks and output contracts. Keep code-generated hints. This does not remove the model's pretrained knowledge. Preserve generic evidence limitations, missing-data cautions, and definitions used to interpret measured diagnostics; these are not parameter-mechanism priors.",
+  "shared_execution": "Shared hydrological executor, evaluation period, legal ranges and precision, phase locks except where explicitly ablated, same-background acceptance, center-reference reuse, retry/fallback policy, final confirmation and measured usage accounting remain active.",
+  "default_budget_mode": "matched_reference",
+  "exploration_policy": "compatible_authenticated_50_evaluation_bundle_allowed",
+  "budget": {
+    "scope": "per_subbasin",
+    "initial_exploration": 50,
+    "main_loop_rounds": 90,
+    "single_candidate_rounds": 75,
+    "multi_candidate_rounds": 15,
+    "candidates_per_mc_round": 3,
+    "main_loop_evaluations": 120,
+    "base_total_evaluations": 170,
+    "phase_rounds": [
+      50,
+      30,
+      10
+    ],
+    "phase_mc_rounds": [
+      10,
+      5,
+      0
+    ],
+    "additional_center_rechecks": "reported_separately",
+    "fixed_flux_preparation": "reported_separately"
+  },
+  "activation": "Explicit ablations/run_ablation.py only; ordinary entry points remain unchanged.",
+  "implementation_id": "B3_no_expert_knowledge",
+  "protocol_version": "madr-ablation-v1"
+}
